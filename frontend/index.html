@@ -1,59 +1,13 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="theme-color" content="#0f172a" />
-  <title>Sikok — Loyalty</title>
-  <link rel="stylesheet" href="styles.css" />
-</head>
-<body>
-  <main class="app">
-    <header class="shop" id="shop-header">
-      <h1 id="shop-name">Loading…</h1>
-      <p class="sub" id="shop-sub"></p>
-      <p class="addr" id="shop-addr"></p>
-      <div class="actions">
-        <a id="wa-link" class="btn wa" href="#" target="_blank" rel="noopener">💬 WhatsApp Us</a>
-        <a id="map-link" class="btn map" href="#" target="_blank" rel="noopener">🗺️ Directions</a>
-      </div>
-    </header>
-
-    <section class="card" id="auth-card">
-      <h2>Sign in</h2>
-      <p class="hint">New here? We'll create your account automatically.</p>
-      <form id="auth-form" autocomplete="on">
-        <label>
-          Mobile number
-          <input id="mobile" name="mobile" type="tel" inputmode="tel" required minlength="7" maxlength="15" />
-        </label>
-        <label>
-          Password
-          <input id="password" name="password" type="password" required minlength="4" />
-        </label>
-        <label id="name-row" hidden>
-          Your name
-          <input id="name" name="name" type="text" autocomplete="name" maxlength="100" />
-        </label>
-        <button class="btn primary" type="submit" id="auth-submit">Continue</button>
-        <button class="link" type="button" id="forgot-link">Forgot password?</button>
-        <p class="err" id="auth-err" hidden></p>
-      </form>
-    </section>
-
-    <section class="card" id="dash-card" hidden>
-      <p class="welcome">Welcome, <span id="user-name"></span></p>
-      <p class="last-visit" id="last-visit"></p>
-      <h2>Your loyalty card</h2>
-      <div class="stamps" id="stamps"></div>
-      <p class="progress" id="progress"></p>
-      <button class="btn primary big" id="request-btn">Request Stamp</button>
-      <p class="status" id="status" aria-live="polite"></p>
-      <button class="link" id="logout">Sign out</button>
-    </section>
-  </main>
-
-  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js" crossorigin="anonymous"></script>
-  <script src="app.js" defer></script>
-</body>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#d4145a" />
+    <title>Sikok — Loyalty</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
 </html>

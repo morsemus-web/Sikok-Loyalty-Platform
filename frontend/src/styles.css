@@ -11,7 +11,7 @@
 }
 
 * { box-sizing: border-box; }
-html, body { margin: 0; padding: 0; }
+html, body, #root { margin: 0; padding: 0; }
 body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   background: var(--bg);
@@ -54,6 +54,7 @@ body {
   color: var(--ink);
   text-decoration: none;
   cursor: pointer;
+  font-family: inherit;
 }
 .btn:active { background: #f3f4f6; }
 .btn.primary { background: var(--brand); color: #fff; border-color: var(--brand); }
@@ -68,6 +69,7 @@ body {
   padding: 4px 0;
   cursor: pointer;
   text-align: left;
+  font-family: inherit;
 }
 
 .card {
@@ -79,9 +81,9 @@ body {
 .card h2 { margin: 0 0 8px; font-size: 16px; }
 .card .hint { margin: 0 0 10px; color: var(--ink-soft); font-size: 13px; }
 
-#auth-form { display: flex; flex-direction: column; gap: 10px; }
-#auth-form label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--ink-soft); }
-#auth-form input {
+form { display: flex; flex-direction: column; gap: 10px; }
+form label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--ink-soft); }
+form input {
   font-size: 16px;
   padding: 10px 10px;
   border: 1px solid var(--line);
@@ -89,8 +91,9 @@ body {
   outline: none;
   background: #fff;
   color: var(--ink);
+  font-family: inherit;
 }
-#auth-form input:focus { border-color: var(--brand); }
+form input:focus { border-color: var(--brand); }
 .err { color: var(--err); margin: 4px 0 0; font-size: 13px; }
 
 .welcome { margin: 0 0 4px; color: var(--ink-soft); font-size: 13px; }
@@ -133,5 +136,3 @@ body {
 .status.ok   { background: #ecfdf5; color: #065f46; }
 .status.err  { background: #fef2f2; color: #991b1b; }
 .status.wait { background: #fffbeb; color: #92400e; }
-
-#logout { display: block; margin-top: 10px; }

@@ -12,8 +12,11 @@ __pycache__/
 venv/
 .pytest_cache/
 
-# Node (in case you add a build step later)
+# Node / Vite build
 node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
 
 # OS / editor
 .DS_Store
