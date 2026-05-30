@@ -74,7 +74,37 @@ AMOUNT_MAX = Decimal("100000")
 async def _owner_chat_id_for_shop(shop_id: int) -> Optional[str]:
     async with SessionLocal() as db:
         shop = await db.scalar(select(Shop).where(Shop.shop_id == shop_id))
-        return shop.telegram_chat_id if shop else None
+        if shop is None:
+            return None
+        cid = shop.telegram_chat_id
+        if not cid or cid.startswith("REPLACE"):
+            return None
+        return cid
+
+
+async def _operator_chats(shop_id: int) -> list[tuple[str, str]]:
+    """Return [(label, chat_id), ...] for every configured operator chat.
+
+    Owner (shops.telegram_chat_id) and tech (settings.tech_telegram_chat_id)
+    have the same approval powers — both receive every approval prompt, the
+    first to tap wins, the other gets a 'being handled' notice.
+    """
+    out: list[tuple[str, str]] = []
+    owner = await _owner_chat_id_for_shop(shop_id)
+    if owner:
+        out.append(("Owner", owner))
+    tech = settings.tech_telegram_chat_id
+    if tech and tech != owner:
+        out.append(("Tech", tech))
+    return out
+
+
+def _label_for(chat_id: str, owner_chat_id: Optional[str]) -> str:
+    if chat_id == settings.tech_telegram_chat_id:
+        return "Tech"
+    if chat_id == owner_chat_id:
+        return "Owner"
+    return "another operator"
 
 
 # ---------------------------------------------------------------------------
@@ -85,20 +115,21 @@ async def _owner_chat_id_for_shop(shop_id: int) -> Optional[str]:
 _RETRY_DELAYS = (0.5, 1.5, 3.0)
 
 
-async def send_with_retry(**kwargs: Any) -> None:
+async def send_with_retry(**kwargs: Any) -> Optional[int]:
+    """Send a message with exponential-backoff retry. Returns message_id on success."""
     if _app is None:
-        return
+        return None
     last_err: Optional[BaseException] = None
     for attempt, delay in enumerate((0.0, *_RETRY_DELAYS)):
         if delay:
             await asyncio.sleep(delay)
         try:
-            await _app.bot.send_message(**kwargs)
-            return
+            msg = await _app.bot.send_message(**kwargs)
+            return msg.message_id
         except (BadRequest, Forbidden) as e:
             # Won't fix on retry — chat doesn't exist or user blocked the bot.
             log.warning("Telegram send not retryable (%s): %s", type(e).__name__, e)
-            return
+            return None
         except (NetworkError, TimedOut) as e:
             last_err = e
             log.warning("Telegram send transient failure (attempt %d): %s", attempt + 1, e)
@@ -106,6 +137,34 @@ async def send_with_retry(**kwargs: Any) -> None:
             last_err = e
             log.warning("Telegram send error (attempt %d): %s", attempt + 1, e)
     log.error("Telegram send exhausted retries: %s", last_err)
+    return None
+
+
+async def _broadcast_to_operators(shop_id: int, **kwargs: Any) -> dict[str, int]:
+    """Send the same message to every operator chat. Returns {chat_id: message_id}."""
+    sent: dict[str, int] = {}
+    for _label, cid in await _operator_chats(shop_id):
+        mid = await send_with_retry(chat_id=cid, **kwargs)
+        if mid is not None:
+            sent[cid] = mid
+    return sent
+
+
+async def _edit_other_operators(actor_chat: str, req, status_line: str) -> None:
+    """Append `status_line` to every operator's copy of the approval message EXCEPT the actor's."""
+    messages: dict[str, int] = req.extra.get("messages", {})
+    original = req.extra.get("original_text", "")
+    for cid, mid in messages.items():
+        if cid == actor_chat:
+            continue
+        try:
+            await _app.bot.edit_message_text(
+                chat_id=cid,
+                message_id=mid,
+                text=f"{original}\n\n{status_line}",
+            )
+        except (BadRequest, Forbidden, TelegramError) as e:
+            log.warning("Couldn't edit other operator's message: %s", e)
 
 
 async def bot_send_stamp_request(
@@ -113,9 +172,6 @@ async def bot_send_stamp_request(
 ) -> None:
     if _app is None:
         log.warning("Telegram bot not initialised; skipping send")
-        return
-    chat_id = await _owner_chat_id_for_shop(shop_id)
-    if not chat_id:
         return
 
     reward_visit = current_stamps >= (settings.stamps_to_reward - 1)
@@ -133,24 +189,33 @@ async def bot_send_stamp_request(
             f"Stamps: {current_stamps}/{settings.stamps_to_reward}"
         )
 
-    await send_with_retry(
-        chat_id=chat_id,
+    sent = await _broadcast_to_operators(
+        shop_id,
         text=text,
         reply_markup=_approval_keyboard(pending_id, reward_visit),
     )
+
+    req = pending_store.get(pending_id)
+    if req is not None:
+        req.extra["messages"] = sent
+        req.extra["original_text"] = text
 
 
 async def bot_send_password_reset(*, shop_id: int, pending_id: str, name: str, mobile: str) -> None:
     if _app is None:
         return
-    chat_id = await _owner_chat_id_for_shop(shop_id)
-    if not chat_id:
-        return
-    await send_with_retry(
-        chat_id=chat_id,
-        text=f"Password Reset Request: {name} — {mobile}. Approve?",
+
+    text = f"Password Reset Request: {name} — {mobile}. Approve?"
+    sent = await _broadcast_to_operators(
+        shop_id,
+        text=text,
         reply_markup=_reset_keyboard(pending_id),
     )
+
+    req = pending_store.get(pending_id)
+    if req is not None:
+        req.extra["messages"] = sent
+        req.extra["original_text"] = text
 
 
 # ---------------------------------------------------------------------------
@@ -188,22 +253,41 @@ async def _on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     chat_id = str(update.effective_chat.id)
+    owner_chat = await _owner_chat_id_for_shop(req.shop_id)
+    actor_label = _label_for(chat_id, owner_chat)
+
+    # ---- Cross-operator lock ----
+    # Once the first operator taps anything, the pending is locked to them.
+    # The other operator's message gets edited to "being handled" and they
+    # can't take further action until the lock clears (commit/decline pops
+    # the pending entirely).
+    locked_to = req.extra.get("locked_to")
+    if locked_to and locked_to != chat_id:
+        other_label = _label_for(locked_to, owner_chat)
+        await query.edit_message_text(
+            query.message.text + f"\n\n🔒 Being handled by {other_label}."
+        )
+        return
 
     if action == "decline":
         pending_store.pop(pending_id)
-        await query.edit_message_text(query.message.text + "\n\n🚫 Disregarded.")
+        await query.edit_message_text(query.message.text + f"\n\n🚫 Disregarded by {actor_label}.")
+        await _edit_other_operators(chat_id, req, f"🚫 Disregarded by {actor_label}.")
         await emit_declined(req.socket_room, {"reason": "Declined by Counter"})
-        notify_run("Stamp request declined", f"user_id={req.user_id}")
+        notify_run("Stamp request declined", f"by {actor_label} · user_id={req.user_id}")
         return
 
     if action == "reset_no":
         pending_store.pop(pending_id)
-        await query.edit_message_text(query.message.text + "\n\n🚫 Disregarded.")
+        await query.edit_message_text(query.message.text + f"\n\n🚫 Disregarded by {actor_label}.")
+        await _edit_other_operators(chat_id, req, f"🚫 Disregarded by {actor_label}.")
         await emit_declined(req.socket_room, {"reason": "Reset declined"})
-        notify_run("Password reset declined", f"user_id={req.user_id}")
+        notify_run("Password reset declined", f"by {actor_label} · user_id={req.user_id}")
         return
 
     if action == "approve":
+        # Lock the pending so the other operator can't also approve.
+        req.extra["locked_to"] = chat_id
         prompt = await ctx.bot.send_message(
             chat_id=chat_id,
             text="Enter total sale amount:",
@@ -211,10 +295,10 @@ async def _on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         )
         pending_store.mark_awaiting_amount(pending_id, chat_id, prompt.message_id)
         await query.edit_message_text(query.message.text + "\n\n⏳ Awaiting amount…")
+        await _edit_other_operators(chat_id, req, f"🔒 Being handled by {actor_label}.")
         return
 
     if action == "reenter":
-        # Owner spotted a typo — re-prompt for the amount.
         prompt = await ctx.bot.send_message(
             chat_id=chat_id,
             text="Re-enter total sale amount:",
@@ -241,12 +325,13 @@ async def _on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         pending_store.pop(req.pending_id)
         pending_store.clear_owner_waiting(chat_id)
 
-        await query.edit_message_text(
-            query.message.text
-            + f"\n\n✅ Logged ₹{amount}"
+        success_line = (
+            f"✅ Logged ₹{amount}"
             + (" (discount applied, card reset)" if is_reward else "")
-            + f"\nNew stamp count: {new_stamps}/{settings.stamps_to_reward}"
+            + f" · stamps {new_stamps}/{settings.stamps_to_reward} · by {actor_label}"
         )
+        await query.edit_message_text(query.message.text + f"\n\n{success_line}")
+        await _edit_other_operators(chat_id, req, success_line)
         await emit_approved(
             req.socket_room,
             {
@@ -256,15 +341,16 @@ async def _on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             },
         )
         if is_reward:
-            notify_run("🎁 Reward redeemed", f"₹{amount} · user_id={req.user_id}")
+            notify_run("🎁 Reward redeemed", f"₹{amount} · by {actor_label} · user_id={req.user_id}")
         else:
             notify_run(
                 "Stamp logged",
-                f"₹{amount} · stamps {new_stamps}/{settings.stamps_to_reward} · user_id={req.user_id}",
+                f"₹{amount} · stamps {new_stamps}/{settings.stamps_to_reward} · by {actor_label} · user_id={req.user_id}",
             )
         return
 
     if action == "reset_ok":
+        req.extra["locked_to"] = chat_id  # in case they also re-enter
         pin = f"{secrets.randbelow(10000):04d}"
         async with SessionLocal() as db:
             user = await db.scalar(select(User).where(User.user_id == req.user_id))
@@ -280,8 +366,13 @@ async def _on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             query.message.text + f"\n\n✅ Temporary PIN: *{pin}*\nRead this to the customer.",
             parse_mode="Markdown",
         )
+        await _edit_other_operators(
+            chat_id,
+            req,
+            f"✅ Reset approved by {actor_label}. PIN was shown to {actor_label}.",
+        )
         await emit_password_reset(req.socket_room, {"ok": True})
-        notify_run("Password reset issued", f"{user_name}")
+        notify_run("Password reset issued", f"{user_name} · by {actor_label}")
         return
 
 
