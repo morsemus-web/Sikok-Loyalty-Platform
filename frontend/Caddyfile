@@ -7,18 +7,23 @@
 sikok.in, www.sikok.in {
     encode gzip zstd
 
-    # Socket.IO (WebSocket upgrade is handled automatically by Caddy)
-    @sockets path /socket.io/*
-    reverse_proxy @sockets backend:8000
+    # `handle` blocks are mutually exclusive — first match wins.
+    # Without them, Caddy's default directive order runs try_files before
+    # reverse_proxy and rewrites /api/* to /index.html.
 
-    # REST API
-    @api path /api/*
-    reverse_proxy @api backend:8000
+    handle /socket.io/* {
+        reverse_proxy backend:8000
+    }
 
-    # Static React build + SPA fallback for unknown paths
-    root * /usr/share/caddy
-    try_files {path} /index.html
-    file_server
+    handle /api/* {
+        reverse_proxy backend:8000
+    }
+
+    handle {
+        root * /usr/share/caddy
+        try_files {path} /index.html
+        file_server
+    }
 
     log {
         output stdout
@@ -27,19 +32,20 @@ sikok.in, www.sikok.in {
 }
 
 # ---- HTTP fallback on bare IP (no TLS) ----
-# Lets you access the site via http://20.244.8.112/ for testing before DNS
-# resolves. Caddy auto-redirects sikok.in / www.sikok.in HTTP traffic to HTTPS
-# above; this block only matches everything else on :80.
 :80 {
     encode gzip zstd
 
-    @sockets path /socket.io/*
-    reverse_proxy @sockets backend:8000
+    handle /socket.io/* {
+        reverse_proxy backend:8000
+    }
 
-    @api path /api/*
-    reverse_proxy @api backend:8000
+    handle /api/* {
+        reverse_proxy backend:8000
+    }
 
-    root * /usr/share/caddy
-    try_files {path} /index.html
-    file_server
+    handle {
+        root * /usr/share/caddy
+        try_files {path} /index.html
+        file_server
+    }
 }
