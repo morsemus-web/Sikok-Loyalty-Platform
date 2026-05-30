@@ -3,13 +3,17 @@
     email morsemus@gmail.com
 }
 
-# ---- Production: sikok.in (auto-HTTPS via Let's Encrypt) ----
+# Caddy auto-HTTPS: when a site block has domain names, Caddy automatically
+# - obtains certs from Let's Encrypt (HTTP-01 + TLS-ALPN-01 challenges)
+# - listens on :443 with the cert
+# - listens on :80 to redirect to :443, with a built-in carve-out for
+#   /.well-known/acme-challenge/* so the challenge passes through
+#
+# Adding a separate `:80 { ... }` block breaks that carve-out — the catch-all
+# rules end up swallowing the challenge. Don't add one back.
+
 sikok.in, www.sikok.in {
     encode gzip zstd
-
-    # `handle` blocks are mutually exclusive — first match wins.
-    # Without them, Caddy's default directive order runs try_files before
-    # reverse_proxy and rewrites /api/* to /index.html.
 
     handle /socket.io/* {
         reverse_proxy backend:8000
@@ -28,24 +32,5 @@ sikok.in, www.sikok.in {
     log {
         output stdout
         format console
-    }
-}
-
-# ---- HTTP fallback on bare IP (no TLS) ----
-:80 {
-    encode gzip zstd
-
-    handle /socket.io/* {
-        reverse_proxy backend:8000
-    }
-
-    handle /api/* {
-        reverse_proxy backend:8000
-    }
-
-    handle {
-        root * /usr/share/caddy
-        try_files {path} /index.html
-        file_server
     }
 }
