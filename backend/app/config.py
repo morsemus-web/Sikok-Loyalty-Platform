@@ -5,6 +5,11 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://sikok:sikok@localhost:5432/sikok"
     jwt_secret: str = "change-me"
     telegram_bot_token: str = ""
+    # Tech operator's Telegram chat id — receives the full activity feed
+    # (signups, scan requests, sales, declines, errors, boot events).
+    # The shop owner's chat (stored on the Shop row) is separate and only
+    # receives interactive approval prompts.
+    tech_telegram_chat_id: str = ""
     default_shop_id: int = 1
     debounce_seconds: int = 60
     discount_per_item: int = 100

@@ -3,8 +3,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth import current_user
+from ..config import settings
 from ..database import get_db
 from ..models import LoyaltyCard, User
+from ..notify import notify_run
 from ..pending import pending_store
 from ..schemas import CardOut, StampRequestIn, StampRequestOut
 from ..telegram_bot import bot_send_stamp_request
@@ -85,6 +87,11 @@ async def request_stamp(
         name=user.name,
         mobile=user.mobile_number,
         current_stamps=card.current_stamps,
+    )
+
+    notify_run(
+        "Stamp request awaiting owner",
+        f"{user.name} · {user.mobile_number} · stamps {card.current_stamps}/{settings.stamps_to_reward}",
     )
 
     return StampRequestOut(pending_id=pending_id, socket_room=pending_id)
