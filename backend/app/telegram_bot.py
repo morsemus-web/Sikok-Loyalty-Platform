@@ -20,6 +20,7 @@ from .auth import hash_password
 from .config import settings
 from .database import SessionLocal
 from .models import LoyaltyCard, Shop, Transaction, User
+from .notify import notify_error, notify_run
 from .pending import pending_store
 from .sockets import emit_approved, emit_declined, emit_password_reset
 
@@ -110,8 +111,18 @@ async def bot_send_password_reset(*, shop_id: int, pending_id: str, name: str, m
 async def _on_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         f"Sikok bot online.\nYour chat_id is: {update.effective_chat.id}\n"
-        "Put this in the shops.telegram_chat_id column."
+        "Put this in the shops.telegram_chat_id column.\n\n"
+        "Commands:\n"
+        "  /start  — show this message\n"
+        "  /status — runtime health check"
     )
+
+
+async def _on_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    from .timeutil import now_ist
+
+    text = f"✅ Sikok backend alive · {now_ist().strftime('%d %b %Y, %I:%M %p IST')}"
+    await update.message.reply_text(text)
 
 
 async def _on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -132,12 +143,14 @@ async def _on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         pending_store.pop(pending_id)
         await query.edit_message_text(query.message.text + "\n\n🚫 Disregarded.")
         await emit_declined(req.socket_room, {"reason": "Declined by Counter"})
+        notify_run("Stamp request declined", f"user_id={req.user_id}")
         return
 
     if action == "reset_no":
         pending_store.pop(pending_id)
         await query.edit_message_text(query.message.text + "\n\n🚫 Disregarded.")
         await emit_declined(req.socket_room, {"reason": "Reset declined"})
+        notify_run("Password reset declined", f"user_id={req.user_id}")
         return
 
     if action == "approve":
@@ -160,12 +173,14 @@ async def _on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 return
             user.password_hash = hash_password(pin)
             await db.commit()
+            user_name = user.name
         pending_store.pop(pending_id)
         await query.edit_message_text(
             query.message.text + f"\n\n✅ Temporary PIN: *{pin}*\nRead this to the customer.",
             parse_mode="Markdown",
         )
         await emit_password_reset(req.socket_room, {"ok": True})
+        notify_run("Password reset issued", f"{user_name}")
         return
 
 
@@ -235,6 +250,13 @@ async def _on_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             "discount_applied": is_reward,
         },
     )
+    if is_reward:
+        notify_run("🎁 Reward redeemed", f"₹{amount} · user_id={req.user_id}")
+    else:
+        notify_run(
+            "Stamp logged",
+            f"₹{amount} · stamps {new_stamps}/{settings.stamps_to_reward} · user_id={req.user_id}",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -249,10 +271,18 @@ async def start_bot() -> None:
         log.warning("TELEGRAM_BOT_TOKEN not set — bot disabled")
         return
 
+    async def _on_bot_error(update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        err = ctx.error
+        log.exception("Bot handler error", exc_info=err)
+        if err is not None:
+            notify_error("telegram handler", err)
+
     _app = ApplicationBuilder().token(settings.telegram_bot_token).build()
     _app.add_handler(CommandHandler("start", _on_start))
+    _app.add_handler(CommandHandler("status", _on_status))
     _app.add_handler(CallbackQueryHandler(_on_callback))
     _app.add_handler(MessageHandler(filters.REPLY & filters.TEXT, _on_reply))
+    _app.add_error_handler(_on_bot_error)
 
     await _app.initialize()
     await _app.start()

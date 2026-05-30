@@ -1,0 +1,49 @@
+# Sikok production stack.
+# Usage:
+#   1. Put real secrets into backend/.env (TELEGRAM_BOT_TOKEN, JWT_SECRET).
+#   2. `docker compose up -d --build`
+#   3. After first start, set the owner's chat_id on the seeded shop row:
+#        docker compose exec db psql -U sikok -d sikok \
+#          -c "UPDATE shops SET telegram_chat_id='<chat_id>' WHERE shop_id=1;"
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: sikok
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sikok}
+      POSTGRES_DB: sikok
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Auto-applied on first start (empty data dir only).
+      - ./backend/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sikok -d sikok"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    env_file:
+      - ./backend/.env
+    environment:
+      # Override DATABASE_URL so the backend talks to the db service, not localhost.
+      DATABASE_URL: postgresql+asyncpg://sikok:${POSTGRES_PASSWORD:-sikok}@db:5432/sikok
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "80:80"
+      # Add 443 once you've set up TLS — see deploy notes.
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  pgdata:

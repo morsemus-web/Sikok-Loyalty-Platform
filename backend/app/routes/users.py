@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..auth import current_user, hash_password, make_token, verify_password
 from ..database import get_db
 from ..models import LoyaltyCard, User
+from ..notify import notify_run
 from ..schemas import AuthResponse, ForgotPasswordIn, ForgotPasswordOut, LoginRequest
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -31,6 +32,7 @@ async def login_or_register(payload: LoginRequest, db: AsyncSession = Depends(ge
         await db.commit()
         await db.refresh(user)
         new_account = True
+        notify_run("New customer signed up", f"{user.name} · {user.mobile_number}")
     else:
         if not verify_password(payload.password, user.password_hash):
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid credentials")
@@ -74,4 +76,5 @@ async def forgot_password(payload: ForgotPasswordIn, db: AsyncSession = Depends(
         name=user.name,
         mobile=user.mobile_number,
     )
+    notify_run("Password reset requested", f"{user.name} · {user.mobile_number}")
     return ForgotPasswordOut(pending_id=pending_id)
