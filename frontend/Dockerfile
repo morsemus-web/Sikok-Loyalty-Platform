@@ -10,12 +10,12 @@ COPY src/ ./src/
 
 RUN npm run build
 
-# ---- Runtime stage: nginx serves built assets + proxies API to backend service ----
-FROM nginx:1.27-alpine
+# ---- Runtime stage: Caddy serves built assets + auto-TLS + backend proxy ----
+FROM caddy:2-alpine
 
-COPY --from=builder /app/dist /usr/share/nginx/html
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=builder /app/dist /usr/share/caddy
+COPY Caddyfile /etc/caddy/Caddyfile
 
-EXPOSE 80
+EXPOSE 80 443
 
-CMD ["nginx", "-g", "daemon off;"]
+# Caddy entrypoint runs `caddy run --config /etc/caddy/Caddyfile`

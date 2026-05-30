@@ -1,0 +1,45 @@
+# Global options
+{
+    email morsemus@gmail.com
+}
+
+# ---- Production: sikok.in (auto-HTTPS via Let's Encrypt) ----
+sikok.in, www.sikok.in {
+    encode gzip zstd
+
+    # Socket.IO (WebSocket upgrade is handled automatically by Caddy)
+    @sockets path /socket.io/*
+    reverse_proxy @sockets backend:8000
+
+    # REST API
+    @api path /api/*
+    reverse_proxy @api backend:8000
+
+    # Static React build + SPA fallback for unknown paths
+    root * /usr/share/caddy
+    try_files {path} /index.html
+    file_server
+
+    log {
+        output stdout
+        format console
+    }
+}
+
+# ---- HTTP fallback on bare IP (no TLS) ----
+# Lets you access the site via http://20.244.8.112/ for testing before DNS
+# resolves. Caddy auto-redirects sikok.in / www.sikok.in HTTP traffic to HTTPS
+# above; this block only matches everything else on :80.
+:80 {
+    encode gzip zstd
+
+    @sockets path /socket.io/*
+    reverse_proxy @sockets backend:8000
+
+    @api path /api/*
+    reverse_proxy @api backend:8000
+
+    root * /usr/share/caddy
+    try_files {path} /index.html
+    file_server
+}

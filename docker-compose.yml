@@ -40,10 +40,17 @@ services:
     build: ./frontend
     ports:
       - "80:80"
-      # Add 443 once you've set up TLS — see deploy notes.
+      - "443:443"
+      - "443:443/udp"          # HTTP/3 (QUIC)
+    volumes:
+      # Persist Caddy's Let's Encrypt certificates across rebuilds.
+      - caddy_data:/data
+      - caddy_config:/config
     depends_on:
       - backend
     restart: unless-stopped
 
 volumes:
   pgdata:
+  caddy_data:
+  caddy_config:

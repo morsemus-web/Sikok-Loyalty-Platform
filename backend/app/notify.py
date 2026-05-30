@@ -34,10 +34,7 @@ async def _send(text: str) -> None:
         log.info("notify (no tech chat_id): %s", text)
         return
 
-    try:
-        await app.bot.send_message(chat_id=chat_id, text=text, disable_notification=True)
-    except Exception:  # noqa: BLE001
-        log.exception("Failed to send tech Telegram notification")
+    await telegram_bot.send_with_retry(chat_id=chat_id, text=text, disable_notification=True)
 
 
 def _ts() -> str:

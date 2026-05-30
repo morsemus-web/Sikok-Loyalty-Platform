@@ -2,10 +2,11 @@ import asyncio
 import logging
 import secrets
 from decimal import Decimal, InvalidOperation
-from typing import Optional
+from typing import Any, Optional
 
 from sqlalchemy import select
 from telegram import ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import BadRequest, Forbidden, NetworkError, TelegramError, TimedOut
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -52,10 +53,59 @@ def _reset_keyboard(pending_id: str) -> InlineKeyboardMarkup:
     )
 
 
+def _confirm_keyboard(pending_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("✅ Yes, log it", callback_data=f"confirm:{pending_id}"),
+                InlineKeyboardButton("✏️ Re-enter", callback_data=f"reenter:{pending_id}"),
+            ]
+        ]
+    )
+
+
+# Per-shop sanity bounds. The owner can override by tapping "Yes, log it"
+# on the confirm step, but typos like ₹25000 instead of ₹2500 will at least
+# get a visible "are you sure" before being committed.
+AMOUNT_MIN = Decimal("10")
+AMOUNT_MAX = Decimal("100000")
+
+
 async def _owner_chat_id_for_shop(shop_id: int) -> Optional[str]:
     async with SessionLocal() as db:
         shop = await db.scalar(select(Shop).where(Shop.shop_id == shop_id))
         return shop.telegram_chat_id if shop else None
+
+
+# ---------------------------------------------------------------------------
+# Resilient send: retries network/timeout errors with exponential backoff,
+# gives up immediately on BadRequest / Forbidden (chat not found, bot blocked).
+# ---------------------------------------------------------------------------
+
+_RETRY_DELAYS = (0.5, 1.5, 3.0)
+
+
+async def send_with_retry(**kwargs: Any) -> None:
+    if _app is None:
+        return
+    last_err: Optional[BaseException] = None
+    for attempt, delay in enumerate((0.0, *_RETRY_DELAYS)):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            await _app.bot.send_message(**kwargs)
+            return
+        except (BadRequest, Forbidden) as e:
+            # Won't fix on retry — chat doesn't exist or user blocked the bot.
+            log.warning("Telegram send not retryable (%s): %s", type(e).__name__, e)
+            return
+        except (NetworkError, TimedOut) as e:
+            last_err = e
+            log.warning("Telegram send transient failure (attempt %d): %s", attempt + 1, e)
+        except TelegramError as e:
+            last_err = e
+            log.warning("Telegram send error (attempt %d): %s", attempt + 1, e)
+    log.error("Telegram send exhausted retries: %s", last_err)
 
 
 async def bot_send_stamp_request(
@@ -83,7 +133,7 @@ async def bot_send_stamp_request(
             f"Stamps: {current_stamps}/{settings.stamps_to_reward}"
         )
 
-    await _app.bot.send_message(
+    await send_with_retry(
         chat_id=chat_id,
         text=text,
         reply_markup=_approval_keyboard(pending_id, reward_visit),
@@ -96,7 +146,7 @@ async def bot_send_password_reset(*, shop_id: int, pending_id: str, name: str, m
     chat_id = await _owner_chat_id_for_shop(shop_id)
     if not chat_id:
         return
-    await _app.bot.send_message(
+    await send_with_retry(
         chat_id=chat_id,
         text=f"Password Reset Request: {name} — {mobile}. Approve?",
         reply_markup=_reset_keyboard(pending_id),
@@ -163,6 +213,57 @@ async def _on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await query.edit_message_text(query.message.text + "\n\n⏳ Awaiting amount…")
         return
 
+    if action == "reenter":
+        # Owner spotted a typo — re-prompt for the amount.
+        prompt = await ctx.bot.send_message(
+            chat_id=chat_id,
+            text="Re-enter total sale amount:",
+            reply_markup=ForceReply(selective=True),
+        )
+        pending_store.mark_awaiting_amount(pending_id, chat_id, prompt.message_id)
+        await query.edit_message_text(query.message.text + "\n\n✏️ Awaiting new amount…")
+        return
+
+    if action == "confirm":
+        amount_str = req.extra.get("amount")
+        if not amount_str:
+            await query.edit_message_text(query.message.text + "\n\n⚠️ Lost the amount, please re-enter.")
+            return
+        amount = Decimal(amount_str)
+        try:
+            new_stamps, is_reward = await _commit_sale(req, chat_id, amount)
+        except Exception as e:  # noqa: BLE001
+            log.exception("Failed to commit sale")
+            notify_error("commit_sale", e)
+            await query.edit_message_text(query.message.text + "\n\n❌ Save failed. Try again.")
+            return
+
+        pending_store.pop(req.pending_id)
+        pending_store.clear_owner_waiting(chat_id)
+
+        await query.edit_message_text(
+            query.message.text
+            + f"\n\n✅ Logged ₹{amount}"
+            + (" (discount applied, card reset)" if is_reward else "")
+            + f"\nNew stamp count: {new_stamps}/{settings.stamps_to_reward}"
+        )
+        await emit_approved(
+            req.socket_room,
+            {
+                "current_stamps": new_stamps,
+                "sale_amount": str(amount),
+                "discount_applied": is_reward,
+            },
+        )
+        if is_reward:
+            notify_run("🎁 Reward redeemed", f"₹{amount} · user_id={req.user_id}")
+        else:
+            notify_run(
+                "Stamp logged",
+                f"₹{amount} · stamps {new_stamps}/{settings.stamps_to_reward} · user_id={req.user_id}",
+            )
+        return
+
     if action == "reset_ok":
         pin = f"{secrets.randbelow(10000):04d}"
         async with SessionLocal() as db:
@@ -185,6 +286,7 @@ async def _on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def _on_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Owner typed an amount in response to ForceReply — parse + ask to confirm."""
     msg = update.message
     if msg is None or msg.reply_to_message is None:
         return
@@ -195,14 +297,32 @@ async def _on_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if req.telegram_message_id != msg.reply_to_message.message_id:
         return
 
-    raw = (msg.text or "").strip().replace(",", "")
+    raw = (msg.text or "").strip().replace(",", "").replace("₹", "").replace("rs", "").replace("Rs", "")
     try:
         amount = Decimal(raw)
         if amount <= 0:
             raise InvalidOperation
     except InvalidOperation:
-        await msg.reply_text("Please reply with a valid amount (e.g., 2500).")
+        await msg.reply_text("That doesn't look like a number. Reply with just the amount, e.g. 2500.")
         return
+
+    # Stash the parsed amount on the pending request for the confirm step.
+    req.extra["amount"] = str(amount)
+
+    warning = ""
+    if amount < AMOUNT_MIN or amount > AMOUNT_MAX:
+        warning = f"\n⚠️ ₹{amount} is outside the usual range (₹{AMOUNT_MIN}–₹{AMOUNT_MAX}). Double-check."
+
+    await msg.reply_text(
+        f"Confirm sale amount: *₹{amount}*?{warning}",
+        reply_markup=_confirm_keyboard(req.pending_id),
+        parse_mode="Markdown",
+    )
+
+
+async def _commit_sale(req, chat_id: str, amount: Decimal) -> tuple[int, bool]:
+    """Apply the sale + stamp/reset to the database. Returns (new_stamps, is_reward)."""
+    from sqlalchemy import func as sa_func
 
     async with SessionLocal() as db:
         card = await db.scalar(
@@ -217,46 +337,16 @@ async def _on_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
         is_reward = card.current_stamps >= (settings.stamps_to_reward - 1)
 
-        tx = Transaction(
-            card_id=card.card_id,
-            sale_amount=amount,
-            discount_applied=is_reward,
-        )
-        db.add(tx)
+        db.add(Transaction(card_id=card.card_id, sale_amount=amount, discount_applied=is_reward))
 
         if is_reward:
             card.current_stamps = 0
         else:
             card.current_stamps += 1
-        from sqlalchemy import func as sa_func
-
         card.last_visit = sa_func.now()
         await db.commit()
         await db.refresh(card)
-        new_stamps = card.current_stamps
-
-    pending_store.pop(req.pending_id)
-    pending_store.clear_owner_waiting(chat_id)
-
-    await msg.reply_text(
-        f"✅ Logged ₹{amount}{' (discount applied, card reset)' if is_reward else ''}.\n"
-        f"New stamp count: {new_stamps}/{settings.stamps_to_reward}"
-    )
-    await emit_approved(
-        req.socket_room,
-        {
-            "current_stamps": new_stamps,
-            "sale_amount": str(amount),
-            "discount_applied": is_reward,
-        },
-    )
-    if is_reward:
-        notify_run("🎁 Reward redeemed", f"₹{amount} · user_id={req.user_id}")
-    else:
-        notify_run(
-            "Stamp logged",
-            f"₹{amount} · stamps {new_stamps}/{settings.stamps_to_reward} · user_id={req.user_id}",
-        )
+        return card.current_stamps, is_reward
 
 
 # ---------------------------------------------------------------------------

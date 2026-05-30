@@ -12,7 +12,23 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
 def _normalize_mobile(raw: str) -> str:
-    return "".join(ch for ch in raw if ch.isdigit() or ch == "+")[:15]
+    """Normalise to a canonical 10-digit Indian mobile number.
+
+    Accepts inputs like '9876543210', '+91 98765 43210', '91-9876543210',
+    or '09876543210'. Rejects anything that doesn't reduce to a 10-digit
+    number starting with 6, 7, 8, or 9.
+    """
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if len(digits) == 12 and digits.startswith("91"):
+        digits = digits[2:]
+    elif len(digits) == 11 and digits.startswith("0"):
+        digits = digits[1:]
+    if len(digits) != 10 or digits[0] not in "6789":
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Enter a valid 10-digit Indian mobile number.",
+        )
+    return digits
 
 
 @router.post("/login", response_model=AuthResponse)
