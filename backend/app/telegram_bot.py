@@ -349,6 +349,32 @@ async def _on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if ":" not in data:
         return
     action, pending_id = data.split(":", 1)
+
+    # ---- Operator-add approval (tech only) ----
+    if action in ("addok", "addno"):
+        chat_id = str(update.effective_chat.id)
+        if chat_id != settings.tech_telegram_chat_id:
+            await query.answer("Only Tech can approve operator requests.", show_alert=True)
+            return
+        pend = _pending_adds.pop(pending_id, None)
+        if pend is None:
+            await _edit(query, query.message.text + "\n\n(Already handled or expired.)")
+            return
+        if action == "addno":
+            await _edit(query, query.message.text + "\n\n🚫 Rejected by Tech.")
+            notify_run("Operator add rejected", f"{pend['name']} ({pend['new_chat']})")
+            return
+        await _commit_operator(pend["new_chat"], pend["name"])
+        await _edit(
+            query,
+            query.message.text + f"\n\n✅ Approved by Tech. {pend['name']} is now an operator.",
+        )
+        notify_run(
+            "Operator added",
+            f"{pend['name']} ({pend['new_chat']}) · requested by {pend['requester']} · approved by Tech",
+        )
+        return
+
     req = pending_store.get(pending_id)
     if req is None:
         await _edit(query,query.message.text + "\n\n(Already handled or expired.)")
@@ -586,7 +612,7 @@ async def _on_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             "/stats — quick numbers\n"
             "\n*Team*\n"
             "/operators — list everyone who can manage the counter\n"
-            "/add `<chat_id> <name>` — grant a new person owner access\n"
+            "/add `<chat_id> <name>` — request a new operator (Tech approves)\n"
             "/removeop `<chat_id>` — revoke access\n"
         )
     await _reply(update.message, text, markdown=True)
@@ -604,6 +630,28 @@ async def _on_operators(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     lines.append("```")
     lines.append("Add with `/add <chat_id> <name>`")
     await _reply(update.message, "\n".join(lines), markdown=True)
+
+
+# Pending /add requests awaiting tech approval: token -> {new_chat, name, requester}
+_pending_adds: dict[str, dict] = {}
+
+
+async def _commit_operator(new_chat: str, name: str) -> None:
+    """Insert/update an operator and refresh the in-memory cache."""
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    async with SessionLocal() as db:
+        stmt = pg_insert(Operator).values(chat_id=new_chat, name=name, role="owner")
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["chat_id"], set_=dict(name=name)
+        )
+        await db.execute(stmt)
+        await db.commit()
+    await reload_operators()
+    await send_with_retry(
+        chat_id=new_chat,
+        text=f"You've been added as a Sikok operator ({name}). Send /help to begin.",
+    )
 
 
 async def _on_add(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -625,33 +673,47 @@ async def _on_add(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     new_chat = args[0]
     name = " ".join(args[1:]).strip()[:100]
+    requester = _label_for(chat_id, await _owner_chat_id_for_shop(settings.default_shop_id))
+    tech = settings.tech_telegram_chat_id
 
-    from sqlalchemy import func as sa_func
-    from sqlalchemy.dialects.postgresql import insert as pg_insert
-
-    async with SessionLocal() as db:
-        stmt = pg_insert(Operator).values(chat_id=new_chat, name=name, role="owner")
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["chat_id"],
-            set_=dict(name=name),
+    # Tech is the approver — if tech initiates, or if no tech chat is configured,
+    # commit straight away. Otherwise route the request to tech for sign-off.
+    if chat_id == tech or not tech:
+        await _commit_operator(new_chat, name)
+        await _reply(
+            update.message,
+            f"✅ {name} (chat `{new_chat}`) can now manage the counter as owner.",
+            markdown=True,
         )
-        await db.execute(stmt)
-        await db.commit()
+        notify_run("Operator added", f"{name} ({new_chat}) · by {requester}")
+        return
 
-    await reload_operators()
-    actor = _label_for(chat_id, await _owner_chat_id_for_shop(settings.default_shop_id))
+    token = secrets.token_urlsafe(8)
+    _pending_adds[token] = {"new_chat": new_chat, "name": name, "requester": requester}
     await _reply(
         update.message,
-        f"✅ {name} (chat `{new_chat}`) can now manage the counter as owner.",
+        f"📨 Request sent to Tech for approval:\nadd *{name}* (chat `{new_chat}`) as operator.",
         markdown=True,
     )
-    notify_run("Operator added", f"{name} ({new_chat}) · by {actor}")
-    # Greet the new operator if their chat is reachable.
     await send_with_retry(
-        chat_id=new_chat,
-        text=f"You've been added as a Sikok operator ({name}). Send /help to begin.",
+        chat_id=tech,
+        text=(
+            f"🆕 Operator add request from {requester}:\n"
+            f"Name: {name}\nChat: {new_chat}\n\nApprove?"
+        ),
+        reply_markup=InlineKeyboardMarkup(
+            [[
+                InlineKeyboardButton("✅ Approve", callback_data=f"addok:{token}"),
+                InlineKeyboardButton("🚫 Reject", callback_data=f"addno:{token}"),
+            ]]
+        ),
     )
 
+
+async def _on_removeop(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = str(update.effective_chat.id)
+    if not await _is_operator(chat_id):
+        return
 
 async def _on_removeop(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = str(update.effective_chat.id)
