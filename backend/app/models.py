@@ -63,4 +63,14 @@ class Transaction(Base):
     card_id: Mapped[int] = mapped_column(ForeignKey("loyalty_cards.card_id", ondelete="CASCADE"), nullable=False)
     sale_amount: Mapped[Decimal] = mapped_column(DECIMAL(10, 2), nullable=False)
     discount_applied: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    handled_by: Mapped[str | None] = mapped_column(String(100))
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class Operator(Base):
+    __tablename__ = "operators"
+
+    chat_id: Mapped[str] = mapped_column(String(50), primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    role: Mapped[str] = mapped_column(String(20), default="owner", nullable=False)
+    added_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

@@ -20,7 +20,7 @@ from telegram.ext import (
 from .auth import hash_password
 from .config import settings
 from .database import SessionLocal
-from .models import LoyaltyCard, Shop, ShopReward, Transaction, User
+from .models import LoyaltyCard, Operator, Shop, ShopReward, Transaction, User
 from .notify import notify_error, notify_run
 from .pending import pending_store
 from .sockets import emit_approved, emit_declined, emit_password_reset
@@ -29,6 +29,22 @@ from .timeutil import format_ist, now_ist
 log = logging.getLogger("sikok.bot")
 
 _app: Optional[Application] = None
+
+# In-memory cache of registered operators: chat_id -> display name.
+# Loaded at startup and refreshed whenever /add or /removeop runs, so the
+# sync _label_for() doesn't need a DB round-trip on every callback.
+_operators: dict[str, str] = {}
+
+
+async def reload_operators() -> None:
+    global _operators
+    try:
+        async with SessionLocal() as db:
+            rows = (await db.execute(select(Operator))).scalars().all()
+            _operators = {r.chat_id: r.name for r in rows}
+        log.info("Loaded %d operators", len(_operators))
+    except Exception:  # noqa: BLE001
+        log.exception("Failed to load operators")
 
 
 def _approval_keyboard(pending_id: str, reward_visit: bool) -> InlineKeyboardMarkup:
@@ -83,27 +99,35 @@ async def _owner_chat_id_for_shop(shop_id: int) -> Optional[str]:
         return cid
 
 
-async def _operator_chats(shop_id: int) -> list[tuple[str, str]]:
-    """Return [(label, chat_id), ...] for every configured operator chat.
-
-    Owner (shops.telegram_chat_id) and tech (settings.tech_telegram_chat_id)
-    have the same approval powers — both receive every approval prompt, the
-    first to tap wins, the other gets a 'being handled' notice.
-    """
-    out: list[tuple[str, str]] = []
+async def _all_operator_ids(shop_id: int) -> set[str]:
+    """Every chat id with operator powers: registered operators + shop owner + env tech."""
+    ids = set(_operators.keys())
     owner = await _owner_chat_id_for_shop(shop_id)
     if owner:
-        out.append(("Owner", owner))
-    tech = settings.tech_telegram_chat_id
-    if tech and tech != owner:
-        out.append(("Tech", tech))
-    return out
+        ids.add(owner)
+    if settings.tech_telegram_chat_id:
+        ids.add(settings.tech_telegram_chat_id)
+    return ids
 
 
-def _label_for(chat_id: str, owner_chat_id: Optional[str]) -> str:
+async def _operator_chats(shop_id: int) -> list[tuple[str, str]]:
+    """Return [(name, chat_id), ...] for every operator chat that should receive
+    approval prompts. First to tap wins; the others get a 'being handled' notice."""
+    owner = await _owner_chat_id_for_shop(shop_id)
+    return [(_label_for(cid, owner), cid) for cid in await _all_operator_ids(shop_id)]
+
+
+async def _is_operator(chat_id: str, shop_id: int = settings.default_shop_id) -> bool:
+    return chat_id in await _all_operator_ids(shop_id)
+
+
+def _label_for(chat_id: str, owner_chat_id: Optional[str] = None) -> str:
+    """Display name for an operator. Registered name wins; else fall back to role."""
+    if chat_id in _operators:
+        return _operators[chat_id]
     if chat_id == settings.tech_telegram_chat_id:
         return "Tech"
-    if chat_id == owner_chat_id:
+    if owner_chat_id and chat_id == owner_chat_id:
         return "Owner"
     return "another operator"
 
@@ -393,7 +417,7 @@ async def _on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             return
         amount = Decimal(amount_str)
         try:
-            new_stamps, new_loop, is_reward = await _commit_sale(req, chat_id, amount)
+            new_stamps, new_loop, is_reward = await _commit_sale(req, chat_id, amount, actor_label)
         except Exception as e:  # noqa: BLE001
             log.exception("Failed to commit sale")
             notify_error("commit_sale", e)
@@ -500,7 +524,7 @@ async def _on_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-async def _commit_sale(req, chat_id: str, amount: Decimal) -> tuple[int, int, bool]:
+async def _commit_sale(req, chat_id: str, amount: Decimal, handled_by: str) -> tuple[int, int, bool]:
     """Apply the sale + stamp/loop advance. Returns (new_stamps, new_loop, is_reward)."""
     from sqlalchemy import func as sa_func
 
@@ -519,7 +543,12 @@ async def _commit_sale(req, chat_id: str, amount: Decimal) -> tuple[int, int, bo
 
         is_reward = card.current_stamps >= (settings.stamps_to_reward - 1)
 
-        db.add(Transaction(card_id=card.card_id, sale_amount=amount, discount_applied=is_reward))
+        db.add(Transaction(
+            card_id=card.card_id,
+            sale_amount=amount,
+            discount_applied=is_reward,
+            handled_by=handled_by,
+        ))
 
         if is_reward:
             # Reward redeemed — reset stamps, advance to next loop.
@@ -536,14 +565,6 @@ async def _commit_sale(req, chat_id: str, amount: Decimal) -> tuple[int, int, bo
 # ---------------------------------------------------------------------------
 # Admin commands (operator-gated)
 # ---------------------------------------------------------------------------
-
-
-async def _is_operator(chat_id: str, shop_id: int = settings.default_shop_id) -> bool:
-    """Operator = owner chat of any shop, OR the configured tech chat."""
-    if chat_id == settings.tech_telegram_chat_id:
-        return True
-    owner = await _owner_chat_id_for_shop(shop_id)
-    return owner is not None and chat_id == owner
 
 
 async def _on_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -563,8 +584,107 @@ async def _on_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             "/rewards — show reward per loop\n"
             "/setreward `<loop> <text>` — e.g. `/setreward 2 ₹150 off per item`\n"
             "/stats — quick numbers\n"
+            "\n*Team*\n"
+            "/operators — list everyone who can manage the counter\n"
+            "/add `<chat_id> <name>` — grant a new person owner access\n"
+            "/removeop `<chat_id>` — revoke access\n"
         )
     await _reply(update.message, text, markdown=True)
+
+
+async def _on_operators(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = str(update.effective_chat.id)
+    if not await _is_operator(chat_id):
+        return
+    owner = await _owner_chat_id_for_shop(settings.default_shop_id)
+    ids = await _all_operator_ids(settings.default_shop_id)
+    lines = ["*Counter operators*", "```"]
+    for cid in sorted(ids):
+        lines.append(f"{_label_for(cid, owner):<20} {cid}")
+    lines.append("```")
+    lines.append("Add with `/add <chat_id> <name>`")
+    await _reply(update.message, "\n".join(lines), markdown=True)
+
+
+async def _on_add(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = str(update.effective_chat.id)
+    if not await _is_operator(chat_id):
+        return
+
+    args = ctx.args or []
+    # First arg must be a numeric chat id; the rest is the display name.
+    if len(args) < 2 or not args[0].lstrip("-").isdigit():
+        await _reply(
+            update.message,
+            "Usage: `/add <chat_id> <name>`\n"
+            "Example: `/add 123456789 Ravi`\n\n"
+            "The new person should open the bot and send /start to see their chat ID.",
+            markdown=True,
+        )
+        return
+
+    new_chat = args[0]
+    name = " ".join(args[1:]).strip()[:100]
+
+    from sqlalchemy import func as sa_func
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    async with SessionLocal() as db:
+        stmt = pg_insert(Operator).values(chat_id=new_chat, name=name, role="owner")
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["chat_id"],
+            set_=dict(name=name),
+        )
+        await db.execute(stmt)
+        await db.commit()
+
+    await reload_operators()
+    actor = _label_for(chat_id, await _owner_chat_id_for_shop(settings.default_shop_id))
+    await _reply(
+        update.message,
+        f"✅ {name} (chat `{new_chat}`) can now manage the counter as owner.",
+        markdown=True,
+    )
+    notify_run("Operator added", f"{name} ({new_chat}) · by {actor}")
+    # Greet the new operator if their chat is reachable.
+    await send_with_retry(
+        chat_id=new_chat,
+        text=f"You've been added as a Sikok operator ({name}). Send /help to begin.",
+    )
+
+
+async def _on_removeop(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = str(update.effective_chat.id)
+    if not await _is_operator(chat_id):
+        return
+
+    args = ctx.args or []
+    if len(args) < 1 or not args[0].lstrip("-").isdigit():
+        await _reply(update.message, "Usage: `/removeop <chat_id>`", markdown=True)
+        return
+
+    target = args[0]
+    # Don't let anyone remove the seeded owner/tech via this command — those are
+    # anchored in config and the shops table.
+    if target == settings.tech_telegram_chat_id or target == await _owner_chat_id_for_shop(
+        settings.default_shop_id
+    ):
+        await _reply(update.message, "That operator is the primary owner/tech and can't be removed here.")
+        return
+
+    async with SessionLocal() as db:
+        op = await db.scalar(select(Operator).where(Operator.chat_id == target))
+        if op is None:
+            await _reply(update.message, "No registered operator with that chat ID.")
+            return
+        name = op.name
+        await db.delete(op)
+        await db.commit()
+
+    await reload_operators()
+    actor = _label_for(chat_id, await _owner_chat_id_for_shop(settings.default_shop_id))
+    await _reply(update.message, f"🚫 Removed {name} (chat {target}).")
+    notify_run("Operator removed", f"{name} ({target}) · by {actor}")
 
 
 async def _on_users(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -648,7 +768,18 @@ async def _on_export(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 .group_by(User.user_id)
             )
         ).all()
+
+        # Most recent handler per customer (DISTINCT ON, newest first).
+        last_handlers = (
+            await db.execute(
+                select(LoyaltyCard.user_id, Transaction.handled_by)
+                .join(Transaction, Transaction.card_id == LoyaltyCard.card_id)
+                .order_by(LoyaltyCard.user_id, Transaction.created_at.desc())
+                .distinct(LoyaltyCard.user_id)
+            )
+        ).all()
     totals_by_user = {r.user_id: r for r in total_sales}
+    last_handler_by_user = {r.user_id: r.handled_by for r in last_handlers}
 
     buf = io.StringIO()
     w = csv.writer(buf)
@@ -656,6 +787,7 @@ async def _on_export(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "user_id", "name", "mobile_number", "joined_ist",
         "shop_id", "current_loop", "current_stamps", "last_visit_ist",
         "lifetime_visits", "lifetime_value_rupees", "rewards_redeemed",
+        "last_managed_by",
     ])
     for u in users:
         t = totals_by_user.get(u.user_id)
@@ -671,6 +803,7 @@ async def _on_export(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             t.tx_count if t else 0,
             f"{t.lifetime_value:.2f}" if t else "0.00",
             t.rewards_redeemed if t else 0,
+            last_handler_by_user.get(u.user_id) or "",
         ])
 
     data = buf.getvalue().encode("utf-8")
@@ -803,12 +936,16 @@ async def start_bot() -> None:
     _app.add_handler(CommandHandler("rewards", _on_rewards))
     _app.add_handler(CommandHandler("setreward", _on_setreward))
     _app.add_handler(CommandHandler("stats", _on_stats))
+    _app.add_handler(CommandHandler("operators", _on_operators))
+    _app.add_handler(CommandHandler("add", _on_add))
+    _app.add_handler(CommandHandler("removeop", _on_removeop))
     _app.add_handler(CallbackQueryHandler(_on_callback))
     _app.add_handler(MessageHandler(filters.REPLY & filters.TEXT, _on_reply))
     _app.add_error_handler(_on_bot_error)
 
     await _app.initialize()
     await _app.start()
+    await reload_operators()
     await _app.updater.start_polling(drop_pending_updates=True)
     log.info("Telegram bot started")
 
