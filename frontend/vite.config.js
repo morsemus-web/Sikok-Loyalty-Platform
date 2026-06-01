@@ -1,9 +1,11 @@
+import { fileURLToPath, URL } from 'node:url';
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
-// During `npm run dev`, /api and /socket.io are proxied to the FastAPI backend
-// at localhost:8000 so the React app and the backend share an origin.
-// In production, Nginx handles the same routing — see ../nginx/sikok.conf.
+// Two entry points:
+//   index.html  -> customer loyalty card (public)
+//   admin.html  -> operator Mini App, opened inside Telegram
+// During `npm run dev`, /api and /socket.io proxy to the FastAPI backend.
 export default defineConfig({
   plugins: [react()],
   server: {
@@ -17,5 +19,11 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     sourcemap: false,
+    rollupOptions: {
+      input: {
+        main: fileURLToPath(new URL('./index.html', import.meta.url)),
+        admin: fileURLToPath(new URL('./admin.html', import.meta.url)),
+      },
+    },
   },
 });

@@ -5,7 +5,7 @@ WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm install --include=dev
 
-COPY index.html vite.config.js ./
+COPY index.html admin.html vite.config.js ./
 COPY src/ ./src/
 
 RUN npm run build

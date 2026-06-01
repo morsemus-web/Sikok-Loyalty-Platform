@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .notify import notify_boot, notify_error
+from .routes import admin as admin_router
 from .routes import shops as shops_router
 from .routes import stamps as stamps_router
 from .routes import users as users_router
@@ -62,6 +63,7 @@ async def _validation_exc(request: Request, exc: RequestValidationError):
 api.include_router(users_router.router)
 api.include_router(shops_router.router)
 api.include_router(stamps_router.router)
+api.include_router(admin_router.router)
 
 
 @api.get("/api/health")

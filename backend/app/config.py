@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     # Indian Standard Time, used for once-per-day stamp gating and any user-facing dates.
     timezone_name: str = "Asia/Kolkata"
     ist_offset_minutes: int = 330  # IST = UTC+5:30
+    # Public origin, used to build the Telegram Mini App URL.
+    public_base_url: str = "https://sikok.in"
+    # Operator Mini App session lifetime (hours).
+    admin_token_hours: int = 12
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

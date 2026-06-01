@@ -5,7 +5,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
 
 from sqlalchemy import Integer, func, select
-from telegram import ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Update, WebAppInfo
 from telegram.error import BadRequest, Forbidden, NetworkError, TelegramError, TimedOut
 from telegram.ext import (
     Application,
@@ -605,6 +605,7 @@ async def _on_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if is_op:
         text += (
             "\n*Operator commands*\n"
+            "/dashboard — open the visual dashboard (Mini App)\n"
             "/users — list registered customers (top 30)\n"
             "/export — full customer + transaction CSV\n"
             "/rewards — show reward per loop\n"
@@ -616,6 +617,19 @@ async def _on_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             "/removeop `<chat_id>` — revoke access\n"
         )
     await _reply(update.message, text, markdown=True)
+
+
+async def _on_dashboard(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = str(update.effective_chat.id)
+    if not await _is_operator(chat_id):
+        return
+    url = f"{settings.public_base_url.rstrip('/')}/admin.html"
+    await update.message.reply_text(
+        "Open the Sikok operator dashboard:",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("📊 Open Dashboard", web_app=WebAppInfo(url=url))]]
+        ),
+    )
 
 
 async def _on_operators(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -999,6 +1013,7 @@ async def start_bot() -> None:
     _app.add_handler(CommandHandler("setreward", _on_setreward))
     _app.add_handler(CommandHandler("stats", _on_stats))
     _app.add_handler(CommandHandler("operators", _on_operators))
+    _app.add_handler(CommandHandler("dashboard", _on_dashboard))
     _app.add_handler(CommandHandler("add", _on_add))
     _app.add_handler(CommandHandler("removeop", _on_removeop))
     _app.add_handler(CallbackQueryHandler(_on_callback))
