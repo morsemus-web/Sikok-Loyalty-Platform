@@ -24,6 +24,7 @@ from .models import LoyaltyCard, Shop, ShopReward, Transaction, User
 from .notify import notify_error, notify_run
 from .pending import pending_store
 from .sockets import emit_approved, emit_declined, emit_password_reset
+from .timeutil import format_ist, now_ist
 
 log = logging.getLogger("sikok.bot")
 
@@ -306,15 +307,13 @@ async def _on_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await _reply(
         update.message,
         f"Sikok bot online.\n"
-        f"Your chat_id is: `{update.effective_chat.id}`\n\n"
+        f"Your chat ID is: `{update.effective_chat.id}`\n\n"
         "Type /help for the full command list.",
         markdown=True,
     )
 
 
 async def _on_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    from .timeutil import now_ist
-
     text = f"✅ Sikok backend alive · {now_ist().strftime('%d %b %Y, %I:%M %p IST')}"
     await update.message.reply_text(text)
 
@@ -552,7 +551,7 @@ async def _on_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     is_op = await _is_operator(chat_id)
     text = (
         "*Sikok bot commands*\n\n"
-        "/start — bot status + your chat_id\n"
+        "/start — bot status + your chat ID\n"
         "/status — runtime health\n"
         "/help — this message\n"
     )
@@ -615,8 +614,6 @@ async def _on_export(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = str(update.effective_chat.id)
     if not await _is_operator(chat_id):
         return
-
-    from .timeutil import format_ist, to_ist
 
     async with SessionLocal() as db:
         users = (
