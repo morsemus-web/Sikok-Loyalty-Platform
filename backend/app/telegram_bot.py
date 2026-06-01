@@ -249,16 +249,66 @@ async def bot_send_password_reset(*, shop_id: int, pending_id: str, name: str, m
 
 
 # ---------------------------------------------------------------------------
+# Safe send/edit wrappers
+#
+# Legacy Telegram Markdown is fragile: a single unbalanced * _ ` [ in a
+# customer name, reward text, or an appended original message triggers
+# "BadRequest: can't parse entities" and the handler crashes. These wrappers
+# try the formatted send, and on a parse error fall back to plain text so the
+# operator always gets *something*. They also swallow the harmless
+# "message is not modified" edit error.
+# ---------------------------------------------------------------------------
+
+
+def _is_parse_error(e: BadRequest) -> bool:
+    return "parse entities" in str(e).lower() or "can't parse" in str(e).lower()
+
+
+async def _reply(message, text: str, markdown: bool = False, **kwargs: Any) -> None:
+    try:
+        await message.reply_text(
+            text, parse_mode=("Markdown" if markdown else None), **kwargs
+        )
+    except BadRequest as e:
+        if markdown and _is_parse_error(e):
+            log.warning("Markdown parse failed, resending plain: %s", e)
+            await message.reply_text(text, **kwargs)
+        else:
+            raise
+
+
+async def _edit(query, text: str, markdown: bool = False, **kwargs: Any) -> None:
+    try:
+        await _edit(query,
+            text, parse_mode=("Markdown" if markdown else None), **kwargs
+        )
+    except BadRequest as e:
+        msg = str(e).lower()
+        if "not modified" in msg:
+            return
+        if markdown and _is_parse_error(e):
+            log.warning("Markdown parse failed on edit, resending plain: %s", e)
+            try:
+                await _edit(query,text, **kwargs)
+            except BadRequest as e2:
+                if "not modified" not in str(e2).lower():
+                    raise
+        else:
+            raise
+
+
+# ---------------------------------------------------------------------------
 # Handlers
 # ---------------------------------------------------------------------------
 
 
 async def _on_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
+    await _reply(
+        update.message,
         f"Sikok bot online.\n"
         f"Your chat_id is: `{update.effective_chat.id}`\n\n"
         "Type /help for the full command list.",
-        parse_mode="Markdown",
+        markdown=True,
     )
 
 
@@ -278,7 +328,7 @@ async def _on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     action, pending_id = data.split(":", 1)
     req = pending_store.get(pending_id)
     if req is None:
-        await query.edit_message_text(query.message.text + "\n\n(Already handled or expired.)")
+        await _edit(query,query.message.text + "\n\n(Already handled or expired.)")
         return
 
     chat_id = str(update.effective_chat.id)
@@ -293,14 +343,14 @@ async def _on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     locked_to = req.extra.get("locked_to")
     if locked_to and locked_to != chat_id:
         other_label = _label_for(locked_to, owner_chat)
-        await query.edit_message_text(
+        await _edit(query,
             query.message.text + f"\n\n🔒 Being handled by {other_label}."
         )
         return
 
     if action == "decline":
         pending_store.pop(pending_id)
-        await query.edit_message_text(query.message.text + f"\n\n🚫 Disregarded by {actor_label}.")
+        await _edit(query,query.message.text + f"\n\n🚫 Disregarded by {actor_label}.")
         await _edit_other_operators(chat_id, req, f"🚫 Disregarded by {actor_label}.")
         await emit_declined(req.socket_room, {"reason": "Declined by Counter"})
         notify_run("Stamp request declined", f"by {actor_label} · user_id={req.user_id}")
@@ -308,7 +358,7 @@ async def _on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     if action == "reset_no":
         pending_store.pop(pending_id)
-        await query.edit_message_text(query.message.text + f"\n\n🚫 Disregarded by {actor_label}.")
+        await _edit(query,query.message.text + f"\n\n🚫 Disregarded by {actor_label}.")
         await _edit_other_operators(chat_id, req, f"🚫 Disregarded by {actor_label}.")
         await emit_declined(req.socket_room, {"reason": "Reset declined"})
         notify_run("Password reset declined", f"by {actor_label} · user_id={req.user_id}")
@@ -323,7 +373,7 @@ async def _on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             reply_markup=ForceReply(selective=True),
         )
         pending_store.mark_awaiting_amount(pending_id, chat_id, prompt.message_id)
-        await query.edit_message_text(query.message.text + "\n\n⏳ Awaiting amount…")
+        await _edit(query,query.message.text + "\n\n⏳ Awaiting amount…")
         await _edit_other_operators(chat_id, req, f"🔒 Being handled by {actor_label}.")
         return
 
@@ -334,13 +384,13 @@ async def _on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             reply_markup=ForceReply(selective=True),
         )
         pending_store.mark_awaiting_amount(pending_id, chat_id, prompt.message_id)
-        await query.edit_message_text(query.message.text + "\n\n✏️ Awaiting new amount…")
+        await _edit(query,query.message.text + "\n\n✏️ Awaiting new amount…")
         return
 
     if action == "confirm":
         amount_str = req.extra.get("amount")
         if not amount_str:
-            await query.edit_message_text(query.message.text + "\n\n⚠️ Lost the amount, please re-enter.")
+            await _edit(query,query.message.text + "\n\n⚠️ Lost the amount, please re-enter.")
             return
         amount = Decimal(amount_str)
         try:
@@ -348,7 +398,7 @@ async def _on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception as e:  # noqa: BLE001
             log.exception("Failed to commit sale")
             notify_error("commit_sale", e)
-            await query.edit_message_text(query.message.text + "\n\n❌ Save failed. Try again.")
+            await _edit(query,query.message.text + "\n\n❌ Save failed. Try again.")
             return
 
         pending_store.pop(req.pending_id)
@@ -364,7 +414,7 @@ async def _on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 f"✅ Logged ₹{amount} · Loop {new_loop} · "
                 f"stamps {new_stamps}/{settings.stamps_to_reward} · by {actor_label}"
             )
-        await query.edit_message_text(query.message.text + f"\n\n{success_line}")
+        await _edit(query,query.message.text + f"\n\n{success_line}")
         await _edit_other_operators(chat_id, req, success_line)
         await emit_approved(
             req.socket_room,
@@ -395,15 +445,15 @@ async def _on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             user = await db.scalar(select(User).where(User.user_id == req.user_id))
             if user is None:
                 pending_store.pop(pending_id)
-                await query.edit_message_text(query.message.text + "\n\n⚠️ User not found.")
+                await _edit(query,query.message.text + "\n\n⚠️ User not found.")
                 return
             user.password_hash = hash_password(pin)
             await db.commit()
             user_name = user.name
         pending_store.pop(pending_id)
-        await query.edit_message_text(
+        await _edit(query,
             query.message.text + f"\n\n✅ Temporary PIN: *{pin}*\nRead this to the customer.",
-            parse_mode="Markdown",
+            markdown=True,
         )
         await _edit_other_operators(
             chat_id,
@@ -443,10 +493,11 @@ async def _on_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if amount < AMOUNT_MIN or amount > AMOUNT_MAX:
         warning = f"\n⚠️ ₹{amount} is outside the usual range (₹{AMOUNT_MIN}–₹{AMOUNT_MAX}). Double-check."
 
-    await msg.reply_text(
+    await _reply(
+        msg,
         f"Confirm sale amount: *₹{amount}*?{warning}",
+        markdown=True,
         reply_markup=_confirm_keyboard(req.pending_id),
-        parse_mode="Markdown",
     )
 
 
@@ -514,7 +565,7 @@ async def _on_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             "/setreward `<loop> <text>` — e.g. `/setreward 2 ₹150 off per item`\n"
             "/stats — quick numbers\n"
         )
-    await update.message.reply_text(text, parse_mode="Markdown")
+    await _reply(update.message, text, markdown=True)
 
 
 async def _on_users(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -548,11 +599,13 @@ async def _on_users(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     for r in rows:
         stamps = r.current_stamps if r.current_stamps is not None else 0
         loop = r.current_loop if r.current_loop is not None else 1
-        lines.append(f"#{r.user_id:>3}  {r.name[:18]:<18}  {r.mobile_number:<12}  L{loop}·{stamps}/4")
+        # Strip backticks so a name can't break out of the code block.
+        name = (r.name or "").replace("`", "")[:18]
+        lines.append(f"#{r.user_id:>3}  {name:<18}  {r.mobile_number:<12}  L{loop}·{stamps}/4")
     lines.append("```")
     if total > 30:
         lines.append(f"\nUse /export for the full {total}-row CSV.")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await _reply(update.message, "\n".join(lines), markdown=True)
 
 
 async def _on_export(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -656,7 +709,7 @@ async def _on_rewards(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         lines.append(f"  Loop {r.loop_number}: {r.description}")
     lines.append("\nChange with `/setreward <loop> <text>`")
     lines.append("Example: `/setreward 3 Free t-shirt`")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await _reply(update.message, "\n".join(lines), markdown=True)
 
 
 async def _on_setreward(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -666,9 +719,10 @@ async def _on_setreward(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     args = ctx.args or []
     if len(args) < 2 or not args[0].isdigit():
-        await update.message.reply_text(
+        await _reply(
+            update.message,
             "Usage: `/setreward <loop> <text>`\nExample: `/setreward 2 ₹150 off per item`",
-            parse_mode="Markdown",
+            markdown=True,
         )
         return
 
@@ -714,13 +768,14 @@ async def _on_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         rewards_given = await db.scalar(
             select(func.count()).where(Transaction.discount_applied.is_(True))
         ) or 0
-    await update.message.reply_text(
+    await _reply(
+        update.message,
         f"*Sikok stats* · {now_ist().strftime('%d %b %I:%M %p IST')}\n\n"
         f"Customers: *{total_users}*\n"
         f"Sales logged: *{total_tx}*\n"
         f"Lifetime revenue: *₹{total_revenue:.2f}*\n"
         f"Rewards redeemed: *{rewards_given}*",
-        parse_mode="Markdown",
+        markdown=True,
     )
 
 
