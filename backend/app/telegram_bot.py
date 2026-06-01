@@ -304,7 +304,7 @@ async def _reply(message, text: str, markdown: bool = False, **kwargs: Any) -> N
 
 async def _edit(query, text: str, markdown: bool = False, **kwargs: Any) -> None:
     try:
-        await _edit(query,
+        await query.edit_message_text(
             text, parse_mode=("Markdown" if markdown else None), **kwargs
         )
     except BadRequest as e:
@@ -314,7 +314,7 @@ async def _edit(query, text: str, markdown: bool = False, **kwargs: Any) -> None
         if markdown and _is_parse_error(e):
             log.warning("Markdown parse failed on edit, resending plain: %s", e)
             try:
-                await _edit(query,text, **kwargs)
+                await query.edit_message_text(text, **kwargs)
             except BadRequest as e2:
                 if "not modified" not in str(e2).lower():
                     raise
