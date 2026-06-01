@@ -1,3 +1,5 @@
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -5,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..auth import current_user
 from ..config import settings
 from ..database import get_db
-from ..models import LoyaltyCard, User
+from ..models import LoyaltyCard, ShopReward, User
 from ..notify import notify_run
 from ..pending import pending_store
 from ..schemas import CardOut, StampRequestIn, StampRequestOut
@@ -15,12 +17,30 @@ from ..timeutil import format_ist, is_same_ist_day, now_ist
 router = APIRouter(prefix="/api", tags=["stamps"])
 
 
-def _card_payload(card: LoyaltyCard) -> dict:
+async def _reward_for(db, shop_id: int, loop_number: int) -> Optional[str]:
+    row = await db.scalar(
+        select(ShopReward).where(
+            ShopReward.shop_id == shop_id, ShopReward.loop_number == loop_number
+        )
+    )
+    if row:
+        return row.description
+    # Fall back to loop 1 if a later loop isn't configured.
+    fallback = await db.scalar(
+        select(ShopReward).where(
+            ShopReward.shop_id == shop_id, ShopReward.loop_number == 1
+        )
+    )
+    return fallback.description if fallback else None
+
+
+def _card_payload(card: LoyaltyCard, next_reward: Optional[str]) -> dict:
     return {
         "card_id": card.card_id,
         "shop_id": card.shop_id,
         "current_stamps": card.current_stamps,
         "current_loop": card.current_loop,
+        "next_reward": next_reward,
         "last_visit": card.last_visit,
         "last_visit_ist": format_ist(card.last_visit) or None,
         "stamped_today": is_same_ist_day(card.last_visit, now_ist()),
@@ -37,11 +57,12 @@ async def my_card(
         select(LoyaltyCard).where(LoyaltyCard.user_id == user.user_id, LoyaltyCard.shop_id == shop_id)
     )
     if card is None:
-        card = LoyaltyCard(user_id=user.user_id, shop_id=shop_id, current_stamps=0)
+        card = LoyaltyCard(user_id=user.user_id, shop_id=shop_id, current_stamps=0, current_loop=1)
         db.add(card)
         await db.commit()
         await db.refresh(card)
-    return _card_payload(card)
+    next_reward = await _reward_for(db, shop_id, card.current_loop)
+    return _card_payload(card, next_reward)
 
 
 @router.post("/stamps/request", response_model=StampRequestOut)

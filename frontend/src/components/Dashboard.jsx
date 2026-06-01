@@ -97,6 +97,7 @@ export default function Dashboard({ shopId, user, onLogout }) {
 
   const filled = card?.current_stamps ?? 0;
   const loop = card?.current_loop ?? 1;
+  const nextReward = card?.next_reward;
   const remaining = Math.max(0, TOTAL - filled);
   const disabled = busy || (card?.stamped_today ?? false);
 
@@ -112,9 +113,15 @@ export default function Dashboard({ shopId, user, onLogout }) {
       <StampGrid filled={filled} />
       <p className="progress">
         {filled >= TOTAL - 1
-          ? `Your next visit unlocks your Loop ${loop} reward.`
-          : `${remaining} more visit${remaining === 1 ? '' : 's'} until your Loop ${loop} reward.`}
+          ? `Your next visit unlocks your Loop ${loop} reward!`
+          : `${remaining} more visit${remaining === 1 ? '' : 's'} to unlock your Loop ${loop} reward.`}
       </p>
+      {nextReward && (
+        <div className="reward-callout">
+          <span className="reward-label">🎁 You'll unlock</span>
+          <span className="reward-text">{nextReward}</span>
+        </div>
+      )}
       <button className="btn primary big" disabled={disabled} onClick={requestStamp}>
         Request Stamp
       </button>

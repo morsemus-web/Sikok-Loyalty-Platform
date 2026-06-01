@@ -4,6 +4,7 @@ import { auth, logout } from './store';
 import ShopHeader from './components/ShopHeader.jsx';
 import AuthCard from './components/AuthCard.jsx';
 import Dashboard from './components/Dashboard.jsx';
+import ShopMap from './components/ShopMap.jsx';
 
 const SHOP_ID = Number(new URLSearchParams(location.search).get('shop') || 1);
 
@@ -34,6 +35,7 @@ export default function App() {
       {user
         ? <Dashboard shopId={SHOP_ID} user={user} onLogout={handleLogout} />
         : <AuthCard onAuthed={handleAuthed} />}
+      <ShopMap shop={shop} />
     </main>
   );
 }

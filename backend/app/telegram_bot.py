@@ -377,14 +377,14 @@ async def _on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         )
         if is_reward:
             notify_run(
-                "🎁 Reward redeemed",
-                f"₹{amount} · ended loop {new_loop - 1} · by {actor_label} · user_id={req.user_id}",
+                f"🎁 Reward redeemed by {actor_label}",
+                f"₹{amount} · ended loop {new_loop - 1} · user_id={req.user_id}",
             )
         else:
             notify_run(
-                "Stamp logged",
+                f"🛒 Sale completed by {actor_label}",
                 f"₹{amount} · loop {new_loop} · stamps {new_stamps}/{settings.stamps_to_reward} · "
-                f"by {actor_label} · user_id={req.user_id}",
+                f"user_id={req.user_id}",
             )
         return
 

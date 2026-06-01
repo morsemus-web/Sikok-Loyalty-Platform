@@ -115,12 +115,52 @@ form input:focus { border-color: var(--brand); }
   font-size: 22px;
   color: #9ca3af;
   background: #fafafa;
+  transition: background 220ms ease, border-color 220ms ease, color 220ms ease;
 }
 .stamp.filled {
   background: var(--brand);
   border: 1px solid var(--brand);
   color: #fff;
 }
+.stamp.just-filled {
+  animation: stamp-pop 800ms cubic-bezier(0.18, 0.89, 0.32, 1.28);
+  box-shadow: 0 4px 14px rgba(212, 20, 90, 0.45);
+}
+
+@keyframes stamp-pop {
+  0%   { transform: scale(0.4) rotate(-20deg); opacity: 0; }
+  35%  { transform: scale(1.25) rotate(8deg);  opacity: 1; }
+  60%  { transform: scale(0.95) rotate(-3deg); }
+  80%  { transform: scale(1.05) rotate(1deg); }
+  100% { transform: scale(1)    rotate(0deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .stamp.just-filled { animation: none; }
+}
+
+.reward-callout {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  margin: 6px 0 10px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, #fff7ed, #ffedd5);
+  border: 1px solid #fed7aa;
+}
+.reward-label { font-size: 11px; font-weight: 600; color: #9a3412; letter-spacing: 0.4px; text-transform: uppercase; }
+.reward-text  { font-size: 14px; color: #7c2d12; font-weight: 600; }
+
+.map-card { padding: 14px; }
+.map-card h2 { margin: 0 0 4px; font-size: 16px; }
+.addr-small { margin: 0 0 10px; color: var(--ink-soft); font-size: 12px; }
+.map-frame {
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  margin-bottom: 10px;
+}
+.map-frame iframe { display: block; border: 0; }
 
 .progress { margin: 0 0 12px; color: var(--ink-soft); font-size: 13px; }
 

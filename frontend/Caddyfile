@@ -23,9 +23,19 @@ sikok.in, www.sikok.in {
         reverse_proxy backend:8000
     }
 
+    # Anything else — try to serve from the React build directory.
+    # Real assets (index.html, /assets/*, /favicon.ico, /vite.svg, etc.) get
+    # served. Anything that isn't a real file 302-redirects to the root with
+    # the original query string preserved (so QR scans like /xyz?shop=1 still
+    # land on the right place).
     handle {
         root * /usr/share/caddy
-        try_files {path} /index.html
+
+        @missing {
+            not file
+        }
+        redir @missing /?{query} 302
+
         file_server
     }
 
