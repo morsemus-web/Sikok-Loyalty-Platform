@@ -4,7 +4,7 @@ import secrets
 from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
 
-from sqlalchemy import select
+from sqlalchemy import Integer, func, select
 from telegram import ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest, Forbidden, NetworkError, TelegramError, TimedOut
 from telegram.ext import (
@@ -20,7 +20,7 @@ from telegram.ext import (
 from .auth import hash_password
 from .config import settings
 from .database import SessionLocal
-from .models import LoyaltyCard, Shop, Transaction, User
+from .models import LoyaltyCard, Shop, ShopReward, Transaction, User
 from .notify import notify_error, notify_run
 from .pending import pending_store
 from .sockets import emit_approved, emit_declined, emit_password_reset
@@ -167,8 +167,36 @@ async def _edit_other_operators(actor_chat: str, req, status_line: str) -> None:
             log.warning("Couldn't edit other operator's message: %s", e)
 
 
+async def _get_reward_text(shop_id: int, loop_number: int) -> str:
+    """Look up the configured reward for this shop+loop; fall back to a default."""
+    async with SessionLocal() as db:
+        row = await db.scalar(
+            select(ShopReward).where(
+                ShopReward.shop_id == shop_id,
+                ShopReward.loop_number == loop_number,
+            )
+        )
+        if row is not None:
+            return row.description
+        # Fall back to loop 1's reward if no specific one is set.
+        fallback = await db.scalar(
+            select(ShopReward).where(
+                ShopReward.shop_id == shop_id, ShopReward.loop_number == 1
+            )
+        )
+        if fallback is not None:
+            return f"{fallback.description} (loop {loop_number} not configured, using loop 1)"
+    return f"₹{settings.discount_per_item} off per item (no reward set for loop {loop_number})"
+
+
 async def bot_send_stamp_request(
-    *, shop_id: int, pending_id: str, name: str, mobile: str, current_stamps: int
+    *,
+    shop_id: int,
+    pending_id: str,
+    name: str,
+    mobile: str,
+    current_stamps: int,
+    current_loop: int,
 ) -> None:
     if _app is None:
         log.warning("Telegram bot not initialised; skipping send")
@@ -176,17 +204,19 @@ async def bot_send_stamp_request(
 
     reward_visit = current_stamps >= (settings.stamps_to_reward - 1)
     if reward_visit:
+        reward_text = await _get_reward_text(shop_id, current_loop)
         text = (
-            f"🚨 REWARD UNLOCKED: {name} is on Visit "
+            f"🚨 REWARD UNLOCKED — Loop {current_loop}\n"
+            f"{name} is on Visit "
             f"{settings.stamps_to_reward}/{settings.stamps_to_reward}!\n"
-            f"Apply ₹{settings.discount_per_item} off PER CLOTHING ITEM.\n"
+            f"Apply: {reward_text}\n"
             f"Mobile: {mobile}"
         )
     else:
         text = (
             f"Stamp Request: {name}\n"
             f"Mobile: {mobile}\n"
-            f"Stamps: {current_stamps}/{settings.stamps_to_reward}"
+            f"Loop {current_loop} · Stamps {current_stamps}/{settings.stamps_to_reward}"
         )
 
     sent = await _broadcast_to_operators(
@@ -225,11 +255,10 @@ async def bot_send_password_reset(*, shop_id: int, pending_id: str, name: str, m
 
 async def _on_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        f"Sikok bot online.\nYour chat_id is: {update.effective_chat.id}\n"
-        "Put this in the shops.telegram_chat_id column.\n\n"
-        "Commands:\n"
-        "  /start  — show this message\n"
-        "  /status — runtime health check"
+        f"Sikok bot online.\n"
+        f"Your chat_id is: `{update.effective_chat.id}`\n\n"
+        "Type /help for the full command list.",
+        parse_mode="Markdown",
     )
 
 
@@ -315,7 +344,7 @@ async def _on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             return
         amount = Decimal(amount_str)
         try:
-            new_stamps, is_reward = await _commit_sale(req, chat_id, amount)
+            new_stamps, new_loop, is_reward = await _commit_sale(req, chat_id, amount)
         except Exception as e:  # noqa: BLE001
             log.exception("Failed to commit sale")
             notify_error("commit_sale", e)
@@ -325,27 +354,37 @@ async def _on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         pending_store.pop(req.pending_id)
         pending_store.clear_owner_waiting(chat_id)
 
-        success_line = (
-            f"✅ Logged ₹{amount}"
-            + (" (discount applied, card reset)" if is_reward else "")
-            + f" · stamps {new_stamps}/{settings.stamps_to_reward} · by {actor_label}"
-        )
+        if is_reward:
+            success_line = (
+                f"✅ Logged ₹{amount} · 🎁 reward applied · "
+                f"now on Loop {new_loop} (0/{settings.stamps_to_reward}) · by {actor_label}"
+            )
+        else:
+            success_line = (
+                f"✅ Logged ₹{amount} · Loop {new_loop} · "
+                f"stamps {new_stamps}/{settings.stamps_to_reward} · by {actor_label}"
+            )
         await query.edit_message_text(query.message.text + f"\n\n{success_line}")
         await _edit_other_operators(chat_id, req, success_line)
         await emit_approved(
             req.socket_room,
             {
                 "current_stamps": new_stamps,
+                "current_loop": new_loop,
                 "sale_amount": str(amount),
                 "discount_applied": is_reward,
             },
         )
         if is_reward:
-            notify_run("🎁 Reward redeemed", f"₹{amount} · by {actor_label} · user_id={req.user_id}")
+            notify_run(
+                "🎁 Reward redeemed",
+                f"₹{amount} · ended loop {new_loop - 1} · by {actor_label} · user_id={req.user_id}",
+            )
         else:
             notify_run(
                 "Stamp logged",
-                f"₹{amount} · stamps {new_stamps}/{settings.stamps_to_reward} · by {actor_label} · user_id={req.user_id}",
+                f"₹{amount} · loop {new_loop} · stamps {new_stamps}/{settings.stamps_to_reward} · "
+                f"by {actor_label} · user_id={req.user_id}",
             )
         return
 
@@ -411,8 +450,8 @@ async def _on_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-async def _commit_sale(req, chat_id: str, amount: Decimal) -> tuple[int, bool]:
-    """Apply the sale + stamp/reset to the database. Returns (new_stamps, is_reward)."""
+async def _commit_sale(req, chat_id: str, amount: Decimal) -> tuple[int, int, bool]:
+    """Apply the sale + stamp/loop advance. Returns (new_stamps, new_loop, is_reward)."""
     from sqlalchemy import func as sa_func
 
     async with SessionLocal() as db:
@@ -422,7 +461,9 @@ async def _commit_sale(req, chat_id: str, amount: Decimal) -> tuple[int, bool]:
             )
         )
         if card is None:
-            card = LoyaltyCard(user_id=req.user_id, shop_id=req.shop_id, current_stamps=0)
+            card = LoyaltyCard(
+                user_id=req.user_id, shop_id=req.shop_id, current_stamps=0, current_loop=1
+            )
             db.add(card)
             await db.flush()
 
@@ -431,13 +472,256 @@ async def _commit_sale(req, chat_id: str, amount: Decimal) -> tuple[int, bool]:
         db.add(Transaction(card_id=card.card_id, sale_amount=amount, discount_applied=is_reward))
 
         if is_reward:
+            # Reward redeemed — reset stamps, advance to next loop.
             card.current_stamps = 0
+            card.current_loop += 1
         else:
             card.current_stamps += 1
         card.last_visit = sa_func.now()
         await db.commit()
         await db.refresh(card)
-        return card.current_stamps, is_reward
+        return card.current_stamps, card.current_loop, is_reward
+
+
+# ---------------------------------------------------------------------------
+# Admin commands (operator-gated)
+# ---------------------------------------------------------------------------
+
+
+async def _is_operator(chat_id: str, shop_id: int = settings.default_shop_id) -> bool:
+    """Operator = owner chat of any shop, OR the configured tech chat."""
+    if chat_id == settings.tech_telegram_chat_id:
+        return True
+    owner = await _owner_chat_id_for_shop(shop_id)
+    return owner is not None and chat_id == owner
+
+
+async def _on_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = str(update.effective_chat.id)
+    is_op = await _is_operator(chat_id)
+    text = (
+        "*Sikok bot commands*\n\n"
+        "/start — bot status + your chat_id\n"
+        "/status — runtime health\n"
+        "/help — this message\n"
+    )
+    if is_op:
+        text += (
+            "\n*Operator commands*\n"
+            "/users — list registered customers (top 30)\n"
+            "/export — full customer + transaction CSV\n"
+            "/rewards — show reward per loop\n"
+            "/setreward `<loop> <text>` — e.g. `/setreward 2 ₹150 off per item`\n"
+            "/stats — quick numbers\n"
+        )
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
+async def _on_users(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = str(update.effective_chat.id)
+    if not await _is_operator(chat_id):
+        return
+
+    async with SessionLocal() as db:
+        rows = (
+            await db.execute(
+                select(
+                    User.user_id,
+                    User.name,
+                    User.mobile_number,
+                    LoyaltyCard.current_stamps,
+                    LoyaltyCard.current_loop,
+                    User.created_at,
+                )
+                .join(LoyaltyCard, LoyaltyCard.user_id == User.user_id, isouter=True)
+                .order_by(User.created_at.desc())
+                .limit(30)
+            )
+        ).all()
+        total = await db.scalar(select(func.count(User.user_id))) or 0
+
+    if not rows:
+        await update.message.reply_text("No customers yet.")
+        return
+
+    lines = [f"*Customers* (showing latest {len(rows)} of {total})", "```"]
+    for r in rows:
+        stamps = r.current_stamps if r.current_stamps is not None else 0
+        loop = r.current_loop if r.current_loop is not None else 1
+        lines.append(f"#{r.user_id:>3}  {r.name[:18]:<18}  {r.mobile_number:<12}  L{loop}·{stamps}/4")
+    lines.append("```")
+    if total > 30:
+        lines.append(f"\nUse /export for the full {total}-row CSV.")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def _on_export(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    import csv
+    import io
+
+    chat_id = str(update.effective_chat.id)
+    if not await _is_operator(chat_id):
+        return
+
+    from .timeutil import format_ist, to_ist
+
+    async with SessionLocal() as db:
+        users = (
+            await db.execute(
+                select(
+                    User.user_id,
+                    User.name,
+                    User.mobile_number,
+                    User.created_at,
+                    LoyaltyCard.shop_id,
+                    LoyaltyCard.current_stamps,
+                    LoyaltyCard.current_loop,
+                    LoyaltyCard.last_visit,
+                )
+                .join(LoyaltyCard, LoyaltyCard.user_id == User.user_id, isouter=True)
+                .order_by(User.user_id)
+            )
+        ).all()
+
+        total_sales = (
+            await db.execute(
+                select(
+                    User.user_id,
+                    func.count(Transaction.transaction_id).label("tx_count"),
+                    func.coalesce(func.sum(Transaction.sale_amount), 0).label("lifetime_value"),
+                    func.sum(
+                        func.cast(Transaction.discount_applied, Integer)
+                    ).label("rewards_redeemed"),
+                )
+                .join(LoyaltyCard, LoyaltyCard.user_id == User.user_id)
+                .join(Transaction, Transaction.card_id == LoyaltyCard.card_id, isouter=True)
+                .group_by(User.user_id)
+            )
+        ).all()
+    totals_by_user = {r.user_id: r for r in total_sales}
+
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow([
+        "user_id", "name", "mobile_number", "joined_ist",
+        "shop_id", "current_loop", "current_stamps", "last_visit_ist",
+        "lifetime_visits", "lifetime_value_rupees", "rewards_redeemed",
+    ])
+    for u in users:
+        t = totals_by_user.get(u.user_id)
+        w.writerow([
+            u.user_id,
+            u.name,
+            u.mobile_number,
+            format_ist(u.created_at),
+            u.shop_id or "",
+            u.current_loop or 1,
+            u.current_stamps if u.current_stamps is not None else 0,
+            format_ist(u.last_visit) if u.last_visit else "",
+            t.tx_count if t else 0,
+            f"{t.lifetime_value:.2f}" if t else "0.00",
+            t.rewards_redeemed if t else 0,
+        ])
+
+    data = buf.getvalue().encode("utf-8")
+    fname = f"sikok-customers-{now_ist().strftime('%Y%m%d-%H%M')}.csv"
+    await update.message.reply_document(
+        document=io.BytesIO(data),
+        filename=fname,
+        caption=f"📋 {len(users)} customers · generated {format_ist(now_ist())}",
+    )
+
+
+async def _on_rewards(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = str(update.effective_chat.id)
+    if not await _is_operator(chat_id):
+        return
+    async with SessionLocal() as db:
+        rows = (
+            await db.execute(
+                select(ShopReward)
+                .where(ShopReward.shop_id == settings.default_shop_id)
+                .order_by(ShopReward.loop_number)
+            )
+        ).scalars().all()
+
+    if not rows:
+        await update.message.reply_text(
+            "No rewards configured. Set one with /setreward 1 ₹100 off per item"
+        )
+        return
+
+    lines = ["*Rewards by loop*"]
+    for r in rows:
+        lines.append(f"  Loop {r.loop_number}: {r.description}")
+    lines.append("\nChange with `/setreward <loop> <text>`")
+    lines.append("Example: `/setreward 3 Free t-shirt`")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def _on_setreward(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = str(update.effective_chat.id)
+    if not await _is_operator(chat_id):
+        return
+
+    args = ctx.args or []
+    if len(args) < 2 or not args[0].isdigit():
+        await update.message.reply_text(
+            "Usage: `/setreward <loop> <text>`\nExample: `/setreward 2 ₹150 off per item`",
+            parse_mode="Markdown",
+        )
+        return
+
+    loop_num = int(args[0])
+    description = " ".join(args[1:]).strip()
+    if loop_num < 1 or len(description) > 500:
+        await update.message.reply_text("Loop must be ≥1 and description ≤500 chars.")
+        return
+
+    from sqlalchemy import func as sa_func
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    async with SessionLocal() as db:
+        stmt = pg_insert(ShopReward).values(
+            shop_id=settings.default_shop_id,
+            loop_number=loop_num,
+            description=description,
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["shop_id", "loop_number"],
+            set_=dict(description=description, updated_at=sa_func.now()),
+        )
+        await db.execute(stmt)
+        await db.commit()
+
+    actor = _label_for(chat_id, await _owner_chat_id_for_shop(settings.default_shop_id))
+    await update.message.reply_text(
+        f"✅ Loop {loop_num} reward set to:\n  {description}"
+    )
+    notify_run("Reward updated", f"Loop {loop_num}: {description} · by {actor}")
+
+
+async def _on_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = str(update.effective_chat.id)
+    if not await _is_operator(chat_id):
+        return
+    async with SessionLocal() as db:
+        total_users = await db.scalar(select(func.count(User.user_id))) or 0
+        total_tx = await db.scalar(select(func.count(Transaction.transaction_id))) or 0
+        total_revenue = await db.scalar(
+            select(func.coalesce(func.sum(Transaction.sale_amount), 0))
+        ) or 0
+        rewards_given = await db.scalar(
+            select(func.count()).where(Transaction.discount_applied.is_(True))
+        ) or 0
+    await update.message.reply_text(
+        f"*Sikok stats* · {now_ist().strftime('%d %b %I:%M %p IST')}\n\n"
+        f"Customers: *{total_users}*\n"
+        f"Sales logged: *{total_tx}*\n"
+        f"Lifetime revenue: *₹{total_revenue:.2f}*\n"
+        f"Rewards redeemed: *{rewards_given}*",
+        parse_mode="Markdown",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -461,6 +745,12 @@ async def start_bot() -> None:
     _app = ApplicationBuilder().token(settings.telegram_bot_token).build()
     _app.add_handler(CommandHandler("start", _on_start))
     _app.add_handler(CommandHandler("status", _on_status))
+    _app.add_handler(CommandHandler("help", _on_help))
+    _app.add_handler(CommandHandler("users", _on_users))
+    _app.add_handler(CommandHandler("export", _on_export))
+    _app.add_handler(CommandHandler("rewards", _on_rewards))
+    _app.add_handler(CommandHandler("setreward", _on_setreward))
+    _app.add_handler(CommandHandler("stats", _on_stats))
     _app.add_handler(CallbackQueryHandler(_on_callback))
     _app.add_handler(MessageHandler(filters.REPLY & filters.TEXT, _on_reply))
     _app.add_error_handler(_on_bot_error)

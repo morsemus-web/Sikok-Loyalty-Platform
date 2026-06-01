@@ -20,6 +20,7 @@ def _card_payload(card: LoyaltyCard) -> dict:
         "card_id": card.card_id,
         "shop_id": card.shop_id,
         "current_stamps": card.current_stamps,
+        "current_loop": card.current_loop,
         "last_visit": card.last_visit,
         "last_visit_ist": format_ist(card.last_visit) or None,
         "stamped_today": is_same_ist_day(card.last_visit, now_ist()),
@@ -87,11 +88,13 @@ async def request_stamp(
         name=user.name,
         mobile=user.mobile_number,
         current_stamps=card.current_stamps,
+        current_loop=card.current_loop,
     )
 
     notify_run(
         "Stamp request awaiting owner",
-        f"{user.name} · {user.mobile_number} · stamps {card.current_stamps}/{settings.stamps_to_reward}",
+        f"{user.name} · {user.mobile_number} · loop {card.current_loop} · "
+        f"stamps {card.current_stamps}/{settings.stamps_to_reward}",
     )
 
     return StampRequestOut(pending_id=pending_id, socket_room=pending_id)

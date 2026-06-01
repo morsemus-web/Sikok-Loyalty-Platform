@@ -38,10 +38,22 @@ class LoyaltyCard(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False)
     shop_id: Mapped[int] = mapped_column(ForeignKey("shops.shop_id", ondelete="CASCADE"), nullable=False)
     current_stamps: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    current_loop: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     last_visit: Mapped[datetime | None] = mapped_column(DateTime)
 
     user: Mapped[User] = relationship(lazy="joined")
     shop: Mapped[Shop] = relationship(lazy="joined")
+
+
+class ShopReward(Base):
+    __tablename__ = "shop_rewards"
+
+    shop_id: Mapped[int] = mapped_column(
+        ForeignKey("shops.shop_id", ondelete="CASCADE"), primary_key=True, nullable=False
+    )
+    loop_number: Mapped[int] = mapped_column(Integer, primary_key=True, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
 class Transaction(Base):

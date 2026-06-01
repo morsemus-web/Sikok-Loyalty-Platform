@@ -96,6 +96,7 @@ export default function Dashboard({ shopId, user, onLogout }) {
   }
 
   const filled = card?.current_stamps ?? 0;
+  const loop = card?.current_loop ?? 1;
   const remaining = Math.max(0, TOTAL - filled);
   const disabled = busy || (card?.stamped_today ?? false);
 
@@ -107,12 +108,12 @@ export default function Dashboard({ shopId, user, onLogout }) {
           ? `Last visit: ${card.last_visit_ist}`
           : 'No visits yet — scan your first stamp today.'}
       </p>
-      <h2>Your loyalty card</h2>
+      <h2>Your loyalty card · Loop {loop}</h2>
       <StampGrid filled={filled} />
       <p className="progress">
         {filled >= TOTAL - 1
-          ? 'Your next visit unlocks ₹100 off per item.'
-          : `${remaining} more visit${remaining === 1 ? '' : 's'} until your reward.`}
+          ? `Your next visit unlocks your Loop ${loop} reward.`
+          : `${remaining} more visit${remaining === 1 ? '' : 's'} until your Loop ${loop} reward.`}
       </p>
       <button className="btn primary big" disabled={disabled} onClick={requestStamp}>
         Request Stamp
