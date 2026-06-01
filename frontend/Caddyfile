@@ -3,15 +3,7 @@
     email morsemus@gmail.com
 }
 
-# Caddy auto-HTTPS: when a site block has domain names, Caddy automatically
-# - obtains certs from Let's Encrypt (HTTP-01 + TLS-ALPN-01 challenges)
-# - listens on :443 with the cert
-# - listens on :80 to redirect to :443, with a built-in carve-out for
-#   /.well-known/acme-challenge/* so the challenge passes through
-#
-# Adding a separate `:80 { ... }` block breaks that carve-out — the catch-all
-# rules end up swallowing the challenge. Don't add one back.
-
+# Auto-HTTPS via Let's Encrypt for both apex and www.
 sikok.in, www.sikok.in {
     encode gzip zstd
 
@@ -23,11 +15,16 @@ sikok.in, www.sikok.in {
         reverse_proxy backend:8000
     }
 
-    # Anything else — try to serve from the React build directory.
-    # Real assets (index.html, /assets/*, /favicon.ico, /vite.svg, etc.) get
-    # served. Anything that isn't a real file 302-redirects to the root with
-    # the original query string preserved (so QR scans like /xyz?shop=1 still
-    # land on the right place).
+    # The site root explicitly serves index.html — without this, the
+    # `not file` matcher below would treat `/` as missing and redirect.
+    handle / {
+        root * /usr/share/caddy
+        rewrite * /index.html
+        file_server
+    }
+
+    # Everything else: real assets pass through, unknown paths 302 to / with
+    # the query string preserved (so QR scans like /xyz?shop=1 still land).
     handle {
         root * /usr/share/caddy
 
