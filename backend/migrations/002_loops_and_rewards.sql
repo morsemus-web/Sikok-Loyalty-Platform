@@ -14,5 +14,5 @@ CREATE TABLE IF NOT EXISTS shop_rewards (
 
 -- Seed default reward for loop 1 of Dhamaka Sale if not already set.
 INSERT INTO shop_rewards (shop_id, loop_number, description)
-VALUES (1, 1, '₹100 off PER CLOTHING ITEM')
+VALUES (1, 1, '₹50 OFF PER ITEM')
 ON CONFLICT (shop_id, loop_number) DO NOTHING;

@@ -38,6 +38,17 @@ body {
 }
 .shop h1 { margin: 0; font-size: 18px; }
 .shop .sub { margin: 2px 0 6px; font-size: 13px; color: var(--ink-soft); }
+.shop .tagline {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, var(--brand), #ff5a8a);
+  color: #fff;
+  font-weight: 700;
+  font-size: 13px;
+  text-align: center;
+  letter-spacing: 0.3px;
+}
 .shop .addr { margin: 0 0 10px; font-size: 13px; line-height: 1.4; color: var(--ink-soft); }
 .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 

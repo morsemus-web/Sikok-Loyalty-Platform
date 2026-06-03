@@ -95,8 +95,7 @@ function StatsTab() {
   return (
     <div className="cards">
       <Stat label="Customers" value={data.customers} />
-      <Stat label="Sales logged" value={data.sales} />
-      <Stat label="Revenue" value={`₹${data.revenue.toLocaleString('en-IN')}`} />
+      <Stat label="Stamps given" value={data.stamps} />
       <Stat label="Rewards redeemed" value={data.rewards_redeemed} />
     </div>
   );
@@ -132,7 +131,7 @@ function CustomersTab() {
             <div className="row-meta">
               <span className="chip">Loop {c.current_loop}</span>
               <span className="chip">{c.current_stamps}/4</span>
-              <span className="muted">{c.visits} visits · ₹{c.ltv.toLocaleString('en-IN')}</span>
+              <span className="muted">{c.visits} visits</span>
             </div>
           </div>
         ))}

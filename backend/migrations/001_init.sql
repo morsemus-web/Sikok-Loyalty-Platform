@@ -43,8 +43,8 @@ CREATE INDEX IF NOT EXISTS idx_tx_card ON transactions(card_id);
 INSERT INTO shops (shop_id, name, sub_name, address, whatsapp_number, whatsapp_url, maps_url, telegram_chat_id)
 VALUES (
     1,
-    'Dhamaka Sale',
-    'C/o Singh & sons',
+    'Singh and Sons',
+    NULL,
     'Sewa nagar, Meerut road, Pillar no 520, Near Pragati hospital, Ghaziabad',
     '+91 8744071569',
     'https://wa.me/918744071569',

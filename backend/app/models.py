@@ -61,7 +61,7 @@ class Transaction(Base):
 
     transaction_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     card_id: Mapped[int] = mapped_column(ForeignKey("loyalty_cards.card_id", ondelete="CASCADE"), nullable=False)
-    sale_amount: Mapped[Decimal] = mapped_column(DECIMAL(10, 2), nullable=False)
+    sale_amount: Mapped[Decimal | None] = mapped_column(DECIMAL(10, 2))
     discount_applied: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     handled_by: Mapped[str | None] = mapped_column(String(100))
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

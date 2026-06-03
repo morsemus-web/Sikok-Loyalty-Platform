@@ -50,14 +50,12 @@ async def auth(payload: AuthIn, db: AsyncSession = Depends(get_db)):
 async def stats(op: dict = Depends(current_operator), db: AsyncSession = Depends(get_db)):
     total_users = await db.scalar(select(func.count(User.user_id))) or 0
     total_tx = await db.scalar(select(func.count(Transaction.transaction_id))) or 0
-    revenue = await db.scalar(select(func.coalesce(func.sum(Transaction.sale_amount), 0))) or 0
     rewards = await db.scalar(
         select(func.count()).where(Transaction.discount_applied.is_(True))
     ) or 0
     return {
         "customers": total_users,
-        "sales": total_tx,
-        "revenue": float(revenue),
+        "stamps": total_tx,
         "rewards_redeemed": rewards,
     }
 
@@ -87,7 +85,6 @@ async def customers(op: dict = Depends(current_operator), db: AsyncSession = Dep
                 select(
                     User.user_id,
                     func.count(Transaction.transaction_id).label("visits"),
-                    func.coalesce(func.sum(Transaction.sale_amount), 0).label("ltv"),
                 )
                 .join(LoyaltyCard, LoyaltyCard.user_id == User.user_id)
                 .join(Transaction, Transaction.card_id == LoyaltyCard.card_id, isouter=True)
@@ -108,7 +105,6 @@ async def customers(op: dict = Depends(current_operator), db: AsyncSession = Dep
             "current_stamps": r.current_stamps if r.current_stamps is not None else 0,
             "last_visit_ist": format_ist(r.last_visit) if r.last_visit else "",
             "visits": t.visits if t else 0,
-            "ltv": float(t.ltv) if t else 0.0,
         })
     return {"customers": out, "total": len(out)}
 

@@ -1,11 +1,10 @@
 import asyncio
 import logging
 import secrets
-from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
 
 from sqlalchemy import Integer, func, select
-from telegram import ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Update, WebAppInfo
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, WebAppInfo
 from telegram.error import BadRequest, Forbidden, NetworkError, TelegramError, TimedOut
 from telegram.ext import (
     Application,
@@ -13,8 +12,6 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
-    MessageHandler,
-    filters,
 )
 
 from .auth import hash_password
@@ -48,7 +45,7 @@ async def reload_operators() -> None:
 
 
 def _approval_keyboard(pending_id: str, reward_visit: bool) -> InlineKeyboardMarkup:
-    approve_label = "🎁 Approve REWARD Sale" if reward_visit else "✅ Approve & Log Sale"
+    approve_label = "🎁 Approve Reward" if reward_visit else "✅ Approve & Stamp"
     return InlineKeyboardMarkup(
         [
             [
@@ -68,24 +65,6 @@ def _reset_keyboard(pending_id: str) -> InlineKeyboardMarkup:
             ]
         ]
     )
-
-
-def _confirm_keyboard(pending_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("✅ Yes, log it", callback_data=f"confirm:{pending_id}"),
-                InlineKeyboardButton("✏️ Re-enter", callback_data=f"reenter:{pending_id}"),
-            ]
-        ]
-    )
-
-
-# Per-shop sanity bounds. The owner can override by tapping "Yes, log it"
-# on the confirm step, but typos like ₹25000 instead of ₹2500 will at least
-# get a visible "are you sure" before being committed.
-AMOUNT_MIN = Decimal("10")
-AMOUNT_MAX = Decimal("100000")
 
 
 async def _owner_chat_id_for_shop(shop_id: int) -> Optional[str]:
@@ -416,38 +395,12 @@ async def _on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if action == "approve":
         # Lock the pending so the other operator can't also approve.
         req.extra["locked_to"] = chat_id
-        prompt = await ctx.bot.send_message(
-            chat_id=chat_id,
-            text="Enter total sale amount:",
-            reply_markup=ForceReply(selective=True),
-        )
-        pending_store.mark_awaiting_amount(pending_id, chat_id, prompt.message_id)
-        await _edit(query,query.message.text + "\n\n⏳ Awaiting amount…")
-        await _edit_other_operators(chat_id, req, f"🔒 Being handled by {actor_label}.")
-        return
-
-    if action == "reenter":
-        prompt = await ctx.bot.send_message(
-            chat_id=chat_id,
-            text="Re-enter total sale amount:",
-            reply_markup=ForceReply(selective=True),
-        )
-        pending_store.mark_awaiting_amount(pending_id, chat_id, prompt.message_id)
-        await _edit(query,query.message.text + "\n\n✏️ Awaiting new amount…")
-        return
-
-    if action == "confirm":
-        amount_str = req.extra.get("amount")
-        if not amount_str:
-            await _edit(query,query.message.text + "\n\n⚠️ Lost the amount, please re-enter.")
-            return
-        amount = Decimal(amount_str)
         try:
-            new_stamps, new_loop, is_reward = await _commit_sale(req, chat_id, amount, actor_label)
+            new_stamps, new_loop, is_reward = await _commit_sale(req, chat_id, actor_label)
         except Exception as e:  # noqa: BLE001
-            log.exception("Failed to commit sale")
+            log.exception("Failed to commit stamp")
             notify_error("commit_sale", e)
-            await _edit(query,query.message.text + "\n\n❌ Save failed. Try again.")
+            await _edit(query, query.message.text + "\n\n❌ Save failed. Try again.")
             return
 
         pending_store.pop(req.pending_id)
@@ -455,34 +408,33 @@ async def _on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
         if is_reward:
             success_line = (
-                f"✅ Logged ₹{amount} · 🎁 reward applied · "
-                f"now on Loop {new_loop} (0/{settings.stamps_to_reward}) · by {actor_label}"
+                f"✅ 🎁 Reward applied · now on Loop {new_loop} "
+                f"(0/{settings.stamps_to_reward}) · by {actor_label}"
             )
         else:
             success_line = (
-                f"✅ Logged ₹{amount} · Loop {new_loop} · "
-                f"stamps {new_stamps}/{settings.stamps_to_reward} · by {actor_label}"
+                f"✅ Stamped · Loop {new_loop} · "
+                f"{new_stamps}/{settings.stamps_to_reward} · by {actor_label}"
             )
-        await _edit(query,query.message.text + f"\n\n{success_line}")
+        await _edit(query, query.message.text + f"\n\n{success_line}")
         await _edit_other_operators(chat_id, req, success_line)
         await emit_approved(
             req.socket_room,
             {
                 "current_stamps": new_stamps,
                 "current_loop": new_loop,
-                "sale_amount": str(amount),
                 "discount_applied": is_reward,
             },
         )
         if is_reward:
             notify_run(
                 f"🎁 Reward redeemed by {actor_label}",
-                f"₹{amount} · ended loop {new_loop - 1} · user_id={req.user_id}",
+                f"ended loop {new_loop - 1} · user_id={req.user_id}",
             )
         else:
             notify_run(
-                f"🛒 Sale completed by {actor_label}",
-                f"₹{amount} · loop {new_loop} · stamps {new_stamps}/{settings.stamps_to_reward} · "
+                f"🛒 Stamp added by {actor_label}",
+                f"loop {new_loop} · stamps {new_stamps}/{settings.stamps_to_reward} · "
                 f"user_id={req.user_id}",
             )
         return
@@ -514,44 +466,8 @@ async def _on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
 
-async def _on_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Owner typed an amount in response to ForceReply — parse + ask to confirm."""
-    msg = update.message
-    if msg is None or msg.reply_to_message is None:
-        return
-    chat_id = str(update.effective_chat.id)
-    req = pending_store.pending_for_owner(chat_id)
-    if req is None or not req.awaiting_amount:
-        return
-    if req.telegram_message_id != msg.reply_to_message.message_id:
-        return
-
-    raw = (msg.text or "").strip().replace(",", "").replace("₹", "").replace("rs", "").replace("Rs", "")
-    try:
-        amount = Decimal(raw)
-        if amount <= 0:
-            raise InvalidOperation
-    except InvalidOperation:
-        await msg.reply_text("That doesn't look like a number. Reply with just the amount, e.g. 2500.")
-        return
-
-    # Stash the parsed amount on the pending request for the confirm step.
-    req.extra["amount"] = str(amount)
-
-    warning = ""
-    if amount < AMOUNT_MIN or amount > AMOUNT_MAX:
-        warning = f"\n⚠️ ₹{amount} is outside the usual range (₹{AMOUNT_MIN}–₹{AMOUNT_MAX}). Double-check."
-
-    await _reply(
-        msg,
-        f"Confirm sale amount: *₹{amount}*?{warning}",
-        markdown=True,
-        reply_markup=_confirm_keyboard(req.pending_id),
-    )
-
-
-async def _commit_sale(req, chat_id: str, amount: Decimal, handled_by: str) -> tuple[int, int, bool]:
-    """Apply the sale + stamp/loop advance. Returns (new_stamps, new_loop, is_reward)."""
+async def _commit_sale(req, chat_id: str, handled_by: str) -> tuple[int, int, bool]:
+    """Apply the stamp/loop advance (no sale amount). Returns (new_stamps, new_loop, is_reward)."""
     from sqlalchemy import func as sa_func
 
     async with SessionLocal() as db:
@@ -571,7 +487,7 @@ async def _commit_sale(req, chat_id: str, amount: Decimal, handled_by: str) -> t
 
         db.add(Transaction(
             card_id=card.card_id,
-            sale_amount=amount,
+            sale_amount=None,
             discount_applied=is_reward,
             handled_by=handled_by,
         ))
@@ -834,7 +750,6 @@ async def _on_export(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 select(
                     User.user_id,
                     func.count(Transaction.transaction_id).label("tx_count"),
-                    func.coalesce(func.sum(Transaction.sale_amount), 0).label("lifetime_value"),
                     func.sum(
                         func.cast(Transaction.discount_applied, Integer)
                     ).label("rewards_redeemed"),
@@ -862,8 +777,7 @@ async def _on_export(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     w.writerow([
         "user_id", "name", "mobile_number", "joined_ist",
         "shop_id", "current_loop", "current_stamps", "last_visit_ist",
-        "lifetime_visits", "lifetime_value_rupees", "rewards_redeemed",
-        "last_managed_by",
+        "lifetime_visits", "rewards_redeemed", "last_managed_by",
     ])
     for u in users:
         t = totals_by_user.get(u.user_id)
@@ -877,7 +791,6 @@ async def _on_export(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             u.current_stamps if u.current_stamps is not None else 0,
             format_ist(u.last_visit) if u.last_visit else "",
             t.tx_count if t else 0,
-            f"{t.lifetime_value:.2f}" if t else "0.00",
             t.rewards_redeemed if t else 0,
             last_handler_by_user.get(u.user_id) or "",
         ])
@@ -968,9 +881,6 @@ async def _on_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     async with SessionLocal() as db:
         total_users = await db.scalar(select(func.count(User.user_id))) or 0
         total_tx = await db.scalar(select(func.count(Transaction.transaction_id))) or 0
-        total_revenue = await db.scalar(
-            select(func.coalesce(func.sum(Transaction.sale_amount), 0))
-        ) or 0
         rewards_given = await db.scalar(
             select(func.count()).where(Transaction.discount_applied.is_(True))
         ) or 0
@@ -978,8 +888,7 @@ async def _on_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         update.message,
         f"*Sikok stats* · {now_ist().strftime('%d %b %I:%M %p IST')}\n\n"
         f"Customers: *{total_users}*\n"
-        f"Sales logged: *{total_tx}*\n"
-        f"Lifetime revenue: *₹{total_revenue:.2f}*\n"
+        f"Stamps given: *{total_tx}*\n"
         f"Rewards redeemed: *{rewards_given}*",
         markdown=True,
     )
@@ -1017,7 +926,6 @@ async def start_bot() -> None:
     _app.add_handler(CommandHandler("add", _on_add))
     _app.add_handler(CommandHandler("removeop", _on_removeop))
     _app.add_handler(CallbackQueryHandler(_on_callback))
-    _app.add_handler(MessageHandler(filters.REPLY & filters.TEXT, _on_reply))
     _app.add_error_handler(_on_bot_error)
 
     await _app.initialize()

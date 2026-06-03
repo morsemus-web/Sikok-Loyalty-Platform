@@ -57,8 +57,8 @@ export default function Dashboard({ shopId, user, onLogout }) {
       await loadCard();
       setStatus({
         text: payload?.discount_applied
-          ? `Reward applied! Sale logged: ₹${payload.sale_amount}. Card reset.`
-          : `Stamp added! Sale logged: ₹${payload.sale_amount}.`,
+          ? '🎉 Reward unlocked! Your card has reset for the next loop.'
+          : '✅ Stamp added! See you next visit.',
         kind: 'ok',
       });
       teardownSocket();
